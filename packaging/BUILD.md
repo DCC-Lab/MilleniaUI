@@ -92,6 +92,33 @@ on. This bundle was built on an Intel Mac, so it is **x86_64** (it also runs on
 Apple Silicon via Rosetta 2). To ship a native arm64 build, run the same script
 on an Apple Silicon Mac.
 
+## Automated builds for all three platforms
+
+`.github/workflows/build-app.yml` builds macOS, Windows, and Linux bundles on
+GitHub Actions (PyInstaller can't cross-compile, so each runs on its own
+runner). Two triggers:
+
+- **Publish a GitHub Release** — builds all three and attaches the archives to
+  that release.
+- **Actions → "Build standalone app" → Run workflow** — manual run; download the
+  archives from the run's Artifacts section.
+
+Archives produced:
+
+- `MilleniaUI-macOS.zip` — contains `MilleniaUI.app`. Built on `macos-13`
+  (**Intel/x86_64**, matching the lab bench); for an Apple Silicon build add a
+  `macos-14` matrix entry.
+- `MilleniaUI-Windows.zip` — a `MilleniaUI/` folder with `MilleniaUI.exe` and
+  its DLLs.
+- `MilleniaUI-Linux.tar.gz` — a `MilleniaUI/` folder with the executable, built
+  against Ubuntu 22.04's glibc.
+
+The workflow installs Tk on Linux (`python3-tk`), uses the per-platform icon
+(`.icns` on macOS, `.ico` on Windows; Linux embeds none), and does no code
+signing — so the macOS build still triggers Gatekeeper (see above). The Windows
+and Linux icons come from `packaging/MilleniaUI.ico`, regenerated alongside the
+`.icns` by `python packaging/make_icon.py`.
+
 ## Connecting to the real laser
 
 The bundled app behaves exactly like the script: it auto-detects the Millennia

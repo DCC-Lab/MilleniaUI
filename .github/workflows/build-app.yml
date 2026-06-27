@@ -1,0 +1,134 @@
+name: Build standalone app
+
+# Builds the MilleniaUI bundle for macOS, Windows, and Linux. PyInstaller does
+# not cross-compile, so each platform is frozen on its own runner.
+#
+# Triggers:
+#   * Publishing a GitHub Release -> builds all three and attaches the
+#     archives to that release.
+#   * Manual run (Actions -> "Build standalone app" -> Run workflow) -> builds
+#     all three; download them from the run's Artifacts section.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to attach archives to the release
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13          # Intel macOS -> x86_64 .app (matches the bench)
+            artifact: MilleniaUI-macOS
+          - os: windows-latest
+            artifact: MilleniaUI-Windows
+          - os: ubuntu-22.04
+            artifact: MilleniaUI-Linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "git+https://github.com/DCC-Lab/PyHardwareLibrary.git"
+          pip install pyinstaller
+
+      # --- one build step per OS (the long flag list cannot be shared across
+      #     bash and PowerShell, and the icon format differs per platform) ---
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --windowed --name MilleniaUI --noconfirm \
+            --osx-bundle-identifier ca.ulaval.cervo.milleniaui \
+            --icon packaging/MilleniaUI.icns \
+            --distpath packaging/dist --workpath packaging/build --specpath packaging \
+            --collect-submodules PIL \
+            --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib \
+            --collect-all numpy --collect-all PIL --collect-all serial --collect-all usb \
+            --collect-all pyftdi --collect-all dateutil --collect-all fontTools \
+            --collect-all kiwisolver --collect-all cycler --collect-all pyparsing \
+            --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
+            --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6 \
+            --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
+            millennia_ui.py
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          pyinstaller --windowed --name MilleniaUI --noconfirm
+          --icon packaging/MilleniaUI.ico
+          --distpath packaging/dist --workpath packaging/build --specpath packaging
+          --collect-submodules PIL
+          --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib
+          --collect-all numpy --collect-all PIL --collect-all serial --collect-all usb
+          --collect-all pyftdi --collect-all dateutil --collect-all fontTools
+          --collect-all kiwisolver --collect-all cycler --collect-all pyparsing
+          --exclude-module pandas --exclude-module scipy --exclude-module openpyxl
+          --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6
+          --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx
+          millennia_ui.py
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --windowed --name MilleniaUI --noconfirm \
+            --distpath packaging/dist --workpath packaging/build --specpath packaging \
+            --collect-submodules PIL \
+            --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib \
+            --collect-all numpy --collect-all PIL --collect-all serial --collect-all usb \
+            --collect-all pyftdi --collect-all dateutil --collect-all fontTools \
+            --collect-all kiwisolver --collect-all cycler --collect-all pyparsing \
+            --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
+            --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6 \
+            --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
+            millennia_ui.py
+
+      # --- package one archive per OS ---
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: cd packaging/dist && zip -r -y ../../MilleniaUI-macOS.zip MilleniaUI.app
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path packaging/dist/MilleniaUI -DestinationPath MilleniaUI-Windows.zip
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf MilleniaUI-Linux.tar.gz -C packaging/dist MilleniaUI
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            MilleniaUI-*.zip
+            MilleniaUI-*.tar.gz
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            MilleniaUI-*.zip
+            MilleniaUI-*.tar.gz

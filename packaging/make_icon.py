@@ -128,8 +128,14 @@ def main():
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)],
                    check=True)
     shutil.rmtree(iconset)
+
+    # Windows icon (.ico, cross-platform via PIL; ICO tops out at 256 px).
+    ico = HERE / "MilleniaUI.ico"
+    master.save(ico, format="ICO",
+                sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
+
     master.save(HERE / "MilleniaUI_icon_1024.png")
-    print("wrote", icns)
+    print("wrote", icns, "and", ico)
 
 
 if __name__ == "__main__":
