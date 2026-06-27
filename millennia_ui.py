@@ -73,29 +73,49 @@ def find_millennia_ports():
         return []
 
 
-def probe_port(port_path):
-    """Open then immediately close ``port_path`` to classify its availability.
+def serial_reason(text):
+    """Classify a serial error string as 'busy' / 'permission' / 'missing' / None."""
+    text = (text or "").lower()
+    if "resource busy" in text or "errno 16" in text or "busy" in text:
+        return "busy"
+    if "permission" in text or "errno 13" in text or "access is denied" in text:
+        return "permission"
+    if ("no such file" in text or "errno 2" in text or "could not open" in text
+            or "filenotfounderror" in text):
+        return "missing"
+    return None
 
-    Returns (ok, reason). reason is one of 'busy', 'permission', 'missing', or
-    a raw error string. The driver swallows the underlying serial error and
-    raises a bare UnableToInitialize, so we probe here to tell the user *why*
-    a connection fails -- in particular whether the port is simply in use.
+
+def exception_chain_text(err):
+    """Join an exception with its __cause__/__context__ chain into one string.
+
+    PyHardwareLibrary's MillenniaDevice now preserves the underlying serial
+    error through the chain (DCC-Lab/PyHardwareLibrary#98), so we can read the
+    'Resource busy' reason straight off the raised UnableToInitialize.
+    """
+    parts, seen, cur = [], set(), err
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text = str(cur).strip()
+        if text:
+            parts.append(text)
+        cur = cur.__cause__ or cur.__context__
+    return " | ".join(parts)
+
+
+def probe_port(port_path):
+    """Open then immediately close ``port_path`` to test availability.
+
+    Returns (ok, reason) where reason is 'busy'/'permission'/'missing'/raw.
+    Used to gate auto-reconnect attempts (so we only try when the port is
+    actually free) and as a fallback classifier for older library versions
+    that did not preserve the init error.
     """
     try:
-        port = serial.Serial(port_path, 115200, timeout=0.3)
-        port.close()
+        serial.Serial(port_path, 115200, timeout=0.3).close()
         return True, None
-    except serial.SerialException as err:
-        text = str(err).lower()
-        if "resource busy" in text or "errno 16" in text or "busy" in text:
-            return False, "busy"
-        if "permission" in text or "errno 13" in text or "access is denied" in text:
-            return False, "permission"
-        if "no such file" in text or "errno 2" in text or "could not open" in text:
-            return False, "missing"
-        return False, str(err)
-    except Exception as err:  # pragma: no cover - defensive
-        return False, str(err)
+    except Exception as err:
+        return False, (serial_reason(str(err)) or str(err))
 
 
 class MillenniaController:
@@ -211,7 +231,7 @@ class MillenniaController:
                 diodes_on=None,
                 shutter_open=None,
                 power=None,
-                status=self._friendly_error(err),
+                status=self._connection_message(err, options),
                 status_kind="warn",
             )
             return
@@ -229,6 +249,9 @@ class MillenniaController:
         self._poll_once()
 
     def _make_device(self, options):
+        # No pre-flight probe: just open the device. If it fails, the driver
+        # now preserves the underlying serial error, which _connection_message
+        # reads to explain why (busy / missing / permission).
         if options["simulate"]:
             return DebugMillenniaDevice()
 
@@ -238,33 +261,12 @@ class MillenniaController:
             if not ports:
                 raise ConnectionError(
                     "No Millennia serial port was found. The laser may be in "
-                    "use by another application (for example the Windows "
-                    "'Spectra-Physics' app running under Parallels, which "
-                    "captures the USB port), or the USB driver did not attach. "
-                    "Close that application, check the cable, then Rescan — or "
-                    "tick Simulator to try the GUI without hardware."
+                    "use by another application (e.g. the Windows "
+                    "'Spectra-Physics' app under Parallels, which captures the "
+                    "USB port), or the USB driver did not attach. Close that "
+                    "app and check the cable — it will connect automatically."
                 )
             port = ports[0]
-
-        ok, reason = probe_port(port)
-        if not ok:
-            if reason == "busy":
-                raise ConnectionError(
-                    "Serial port {0} is busy — another program is already "
-                    "using it. Close that program (e.g. the Spectra-Physics "
-                    "Windows app under Parallels) and retry.".format(port)
-                )
-            if reason == "permission":
-                raise ConnectionError(
-                    "Permission denied opening {0}.".format(port)
-                )
-            if reason == "missing":
-                raise ConnectionError(
-                    "Serial port {0} no longer exists. Rescan to refresh.".format(port)
-                )
-            raise ConnectionError(
-                "Cannot open {0}: {1}".format(port, reason)
-            )
 
         return MillenniaDevice(portPath=port)
 
@@ -352,9 +354,17 @@ class MillenniaController:
 
     def _poll_once(self):
         try:
-            diodes_on = self.device.isLaserOn()
-            shutter_open = self.device.isShutterOpen()
-            power = self.device.power()
+            # One snapshot via the driver's status hook (PyHardwareLibrary#98);
+            # fall back to the individual queries on libraries without it.
+            status = self.device.doGetStatusUserInfo()
+            if status:
+                diodes_on = status["isLaserOn"]
+                shutter_open = status["isShutterOpen"]
+                power = status["power"]
+            else:
+                diodes_on = self.device.isLaserOn()
+                shutter_open = self.device.isShutterOpen()
+                power = self.device.power()
         except Exception as err:
             self._connected = False
             self._safe_shutdown()
@@ -390,11 +400,27 @@ class MillenniaController:
         return label
 
     @staticmethod
-    def _friendly_error(err):
+    def _connection_message(err, options):
         # ConnectionError messages we build are already user-facing.
         if isinstance(err, ConnectionError):
             return str(err)
-        return "Could not connect: {0}".format(err)
+        # Read the cause off the preserved exception chain; fall back to a
+        # one-shot probe for older libraries that dropped the init error.
+        reason = serial_reason(exception_chain_text(err))
+        port = options.get("port")
+        if reason is None and port:
+            _, probed = probe_port(port)
+            reason = probed if probed in ("busy", "permission", "missing") else None
+        if reason == "busy":
+            return ("The laser's serial port is busy — another program is "
+                    "using it (e.g. the Spectra-Physics Windows app under "
+                    "Parallels). Close it and it will reconnect automatically.")
+        if reason == "permission":
+            return "Permission denied opening the laser's serial port."
+        if reason == "missing":
+            return ("The laser's serial port is not available. Waiting for it "
+                    "to reappear…")
+        return "Could not connect: {0}".format(exception_chain_text(err) or err)
 
 
 class MillenniaApp:
