@@ -1,0 +1,6 @@
+# Millennia eV control GUI dependencies
+mytk
+pyserial
+# PyHardwareLibrary is not on PyPI; install from the DCC-Lab GitHub repo:
+#   pip install git+https://github.com/DCC-Lab/PyHardwareLibrary.git
+# (installs as the importable package "hardwarelibrary")
