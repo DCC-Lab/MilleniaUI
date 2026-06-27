@@ -54,16 +54,16 @@ needed by the end user, and it launches in the user's own GUI session):
 See [packaging/BUILD.md](packaging/BUILD.md) for details, Gatekeeper notes, and
 code-signing.
 
-## Requirements / known issues
+## Known issues
 
-- **Tk runtime.** myTk is a Tkinter front-end, so a working Tcl/Tk is required.
-  The python.org **3.14** build ships **Tcl/Tk 9.0**, which crashes (SIGILL) on
-  some Intel Macs / macOS 13. If `python -c "import tkinter; tkinter.Tk()"`
-  crashes, use a Python whose Tk works — the python.org **3.13** installer
-  ships the stable **Tk 8.6** and is the recommended runtime on this machine.
 - **Port busy.** If the Spectra-Physics Windows app (or any program) holds the
   laser's USB/serial port, macOS will not expose a `/dev/cu.*` node for it and
   the GUI cannot connect. Quit that app first.
+- **GUI session.** A Tkinter app can only open a window in the GUI login session
+  that owns the screen. Launching it from a shell that belongs to a *different*
+  logged-in user (e.g. running as `dccote` while the console is logged in as
+  `dcclab`) aborts in `libxpc` before any window appears. Run it as the user
+  logged in at the screen, or launch the `.app` from Finder.
 
 ## License
 

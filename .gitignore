@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
+# Generated at build time by packaging/make_version.py (from the git tag)
+/_version.py
+/packaging/windows_version_info.txt
+
 # Virtual environment
 .venv/
 venv/

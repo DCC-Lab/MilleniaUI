@@ -10,4 +10,6 @@
 # For the real laser, first QUIT the Windows "Spectra-Physics" app in Parallels
 # so macOS releases the USB serial port.
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Best-effort: stamp _version.py from the git tag so the window title shows it.
+"$HERE/.venv/bin/python" "$HERE/packaging/make_version.py" >/dev/null 2>&1 || true
 exec "$HERE/.venv/bin/python" "$HERE/millennia_ui.py" "$@"

@@ -48,6 +48,13 @@ from hardwarelibrary.sources.millennia import (
     DebugMillenniaDevice,
 )
 
+# Version is injected at build time by packaging/make_version.py (from the git
+# tag); falls back to a dev marker when running from a checkout.
+try:
+    from _version import __version__
+except Exception:
+    __version__ = "0.0.0+dev"
+
 # The eV's back-panel USB port enumerates as a generic STM32 Virtual COM Port.
 MILLENNIA_VID = 0x0483
 MILLENNIA_PID = 0x5740
@@ -414,7 +421,8 @@ class MillenniaApp:
         self.shutter_open = None
 
         self.app = App(geometry="640x460", name="Millennia eV Control")
-        self.app.window.widget.title("Millennia eV — Laser Control")
+        self.app.window.widget.title(
+            "Millennia eV — Laser Control  (v{0})".format(__version__))
 
         self.controller = MillenniaController(on_state=self._on_state_from_worker)
 
@@ -638,6 +646,9 @@ class MillenniaApp:
 
 def main():
     parser = argparse.ArgumentParser(description="Millennia eV laser control GUI")
+    parser.add_argument(
+        "--version", action="version", version="MilleniaUI {0}".format(__version__),
+    )
     parser.add_argument(
         "--simulate", action="store_true",
         help="Use the built-in DebugMillenniaDevice (no hardware needed).",

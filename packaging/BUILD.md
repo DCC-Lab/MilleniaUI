@@ -8,8 +8,8 @@ directly. Bundling is done with [PyInstaller](https://pyinstaller.org/).
 
 ## One-time setup
 
-From the repo root, in the project's virtual environment (Python 3.13 — see the
-top-level README for why 3.13 and not 3.14):
+From the repo root, in the project's virtual environment (Python 3.13 is the
+tested runtime):
 
 ```bash
 source .venv/bin/activate
@@ -54,6 +54,31 @@ The full command lives in `packaging/build_app.sh`. The non-obvious parts:
 - `--exclude-module pandas/scipy/openpyxl/...` — these are declared by
   `hardwarelibrary` but unused on this app's import path
   (`hardwarelibrary.sources.millennia`); excluding them trims ~100 MB.
+
+## Versioning (from git tags)
+
+The version is derived from the git tag, never hand-edited.
+`packaging/make_version.py` resolves it (from `$MILLENIA_VERSION`, else
+`git describe --tags --always --dirty`, else `0.0.0+dev`), strips a leading
+`v`, and writes two generated, git-ignored files:
+
+- `_version.py` — imported by `millennia_ui.py` (`--version` and the window
+  title report it),
+- `packaging/windows_version_info.txt` — the PyInstaller `--version-file` for
+  the Windows `.exe` version resource.
+
+`build_app.sh` runs it and stamps the macOS bundle's `Info.plist`
+(`CFBundleShortVersionString` / `CFBundleVersion`). In CI, a published release
+pins the version to its tag; the archives are named
+`MilleniaUI-<version>-{macOS,Windows,Linux}.*`.
+
+To cut a versioned release:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+# then publish a Release for that tag on GitHub — the workflow builds all three
+# platforms and attaches the archives.
+```
 
 ## App icon
 

@@ -34,6 +34,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history + tags so make_version.py can describe
 
       - uses: actions/setup-python@v5
         with:
@@ -49,6 +51,17 @@ jobs:
           pip install -r requirements.txt
           pip install "git+https://github.com/DCC-Lab/PyHardwareLibrary.git"
           pip install pyinstaller
+
+      - name: Set version (from tag)
+        shell: bash
+        run: |
+          # On a release, pin to the release tag; otherwise let git describe it.
+          if [ "${{ github.event_name }}" = "release" ]; then
+            export MILLENIA_VERSION="${{ github.event.release.tag_name }}"
+          fi
+          VERSION=$(python packaging/make_version.py)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building MilleniaUI $VERSION"
 
       # --- one build step per OS (the long flag list cannot be shared across
       #     bash and PowerShell, and the icon format differs per platform) ---
@@ -70,11 +83,21 @@ jobs:
             --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
             millennia_ui.py
 
+      - name: Stamp bundle version (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          PLIST="packaging/dist/MilleniaUI.app/Contents/Info.plist"
+          NUM=$(echo "$VERSION" | grep -oE '^[0-9]+(\.[0-9]+){0,2}'); NUM=${NUM:-0.0.0}
+          plutil -replace CFBundleShortVersionString -string "$NUM" "$PLIST"
+          plutil -replace CFBundleVersion -string "$VERSION" "$PLIST"
+
       - name: Build (Windows)
         if: runner.os == 'Windows'
         run: >
           pyinstaller --windowed --name MilleniaUI --noconfirm
           --icon packaging/MilleniaUI.ico
+          --version-file packaging/windows_version_info.txt
           --distpath packaging/dist --workpath packaging/build --specpath packaging
           --collect-submodules PIL
           --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib
@@ -105,16 +128,16 @@ jobs:
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: cd packaging/dist && zip -r -y ../../MilleniaUI-macOS.zip MilleniaUI.app
+        run: cd packaging/dist && zip -r -y "../../MilleniaUI-${VERSION}-macOS.zip" MilleniaUI.app
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path packaging/dist/MilleniaUI -DestinationPath MilleniaUI-Windows.zip
+        run: Compress-Archive -Path packaging/dist/MilleniaUI -DestinationPath "MilleniaUI-$env:VERSION-Windows.zip"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tar -czf MilleniaUI-Linux.tar.gz -C packaging/dist MilleniaUI
+        run: tar -czf "MilleniaUI-${VERSION}-Linux.tar.gz" -C packaging/dist MilleniaUI
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

@@ -10,6 +10,11 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# Derive the version from the git tag and write _version.py (+ the Windows
+# resource, unused here). Prints the resolved version.
+VERSION=$(python packaging/make_version.py)
+echo "Building MilleniaUI $VERSION"
+
 # Absolute path: PyInstaller resolves --icon relative to --specpath, so a
 # "packaging/…" relative path would wrongly become "packaging/packaging/…".
 ICON="$PWD/packaging/MilleniaUI.icns"
@@ -38,5 +43,11 @@ pyinstaller --windowed --name MilleniaUI --noconfirm \
   --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
   millennia_ui.py
 
+# Stamp the bundle's Info.plist with the version.
+PLIST="packaging/dist/MilleniaUI.app/Contents/Info.plist"
+NUM=$(echo "$VERSION" | grep -oE '^[0-9]+(\.[0-9]+){0,2}'); NUM=${NUM:-0.0.0}
+plutil -replace CFBundleShortVersionString -string "$NUM" "$PLIST"
+plutil -replace CFBundleVersion -string "$VERSION" "$PLIST"
+
 echo
-echo "Built: packaging/dist/MilleniaUI.app"
+echo "Built: packaging/dist/MilleniaUI.app  (version $VERSION)"
