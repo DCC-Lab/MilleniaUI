@@ -64,3 +64,7 @@ code-signing.
 - **Port busy.** If the Spectra-Physics Windows app (or any program) holds the
   laser's USB/serial port, macOS will not expose a `/dev/cu.*` node for it and
   the GUI cannot connect. Quit that app first.
+
+## License
+
+[MIT](LICENSE) © 2026 Daniel Côté (DCC-Lab)
