@@ -81,6 +81,8 @@ jobs:
             --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
             --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6 \
             --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
+            --exclude-module u3 --exclude-module u6 --exclude-module u12 \
+            --exclude-module LabJackPython \
             millennia_ui.py
 
       - name: Stamp bundle version (macOS)
@@ -107,6 +109,8 @@ jobs:
           --exclude-module pandas --exclude-module scipy --exclude-module openpyxl
           --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6
           --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx
+          --exclude-module u3 --exclude-module u6 --exclude-module u12
+          --exclude-module LabJackPython
           millennia_ui.py
 
       - name: Build (Linux)
@@ -122,6 +126,8 @@ jobs:
             --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
             --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6 \
             --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
+            --exclude-module u3 --exclude-module u6 --exclude-module u12 \
+            --exclude-module LabJackPython \
             millennia_ui.py
 
       # --- package one archive per OS ---

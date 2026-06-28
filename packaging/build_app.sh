@@ -19,6 +19,16 @@ echo "Building MilleniaUI $VERSION"
 # "packaging/…" relative path would wrongly become "packaging/packaging/…".
 ICON="$PWD/packaging/MilleniaUI.icns"
 
+# PyInstaller's pyusb hook bundles whatever ctypes.find_library('usb-1.0')
+# resolves. Some benches have a stale 2012 /usr/local/lib/libusb-1.0.dylib
+# (an i386/x86_64/ppc fat binary) that PyInstaller 6.x cannot thin -> the
+# build dies in COLLECT. Prepend Homebrew's clean x86_64 libusb so
+# find_library prefers it. No-op on machines without that stale file / brew.
+if command -v brew >/dev/null 2>&1; then
+  LIBUSB_LIB="$(brew --prefix libusb 2>/dev/null)/lib"
+  [ -d "$LIBUSB_LIB" ] && export DYLD_LIBRARY_PATH="$LIBUSB_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+fi
+
 pyinstaller --windowed --name MilleniaUI --noconfirm \
   --osx-bundle-identifier ca.ulaval.cervo.milleniaui \
   --icon "$ICON" \
@@ -41,7 +51,14 @@ pyinstaller --windowed --name MilleniaUI --noconfirm \
   --exclude-module et_xmlfile \
   --exclude-module PyQt5 --exclude-module PyQt6 \
   --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
+  --exclude-module u3 --exclude-module u6 --exclude-module u12 \
+  --exclude-module LabJackPython \
   millennia_ui.py
+  # LabJack (u3/u6/u12/LabJackPython) is pulled in only by --collect-all
+  # hardwarelibrary's unused DAQ module. Its driver, /usr/local/lib/
+  # liblabjackusb.dylib, is an ancient i386/x86_64/ppc fat binary that
+  # PyInstaller 6.x cannot thin -> build fails. The laser is serial-only,
+  # so excluding the LabJack Python modules drops that dylib dependency.
 
 # Stamp the bundle's Info.plist with the version.
 PLIST="packaging/dist/MilleniaUI.app/Contents/Info.plist"
