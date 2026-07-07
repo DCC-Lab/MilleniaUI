@@ -695,26 +695,42 @@ def cli_main(argv):
 
 
 def install_millenia_ctl():
-    """Symlink a ``millenia-ctl`` command onto PATH; return ``(link, note)``.
+    """Install a ``millenia-ctl`` command on PATH; return ``(path, note)``.
 
-    The link points at this program (the app bundle's binary when frozen, else
-    the source script) and dispatches to CLI mode because :func:`main` inspects
-    its own invoked name. Tries ``/usr/local/bin`` first, then ``~/.local/bin``,
-    then ``~/bin`` — the first directory it can write to wins — so it works with
-    or without admin rights.
+    Writes a small wrapper (not a bare symlink) that runs this program in CLI
+    mode with the *same* interpreter/binary it was installed from, so the
+    command always has the right dependencies (mytk >= 1.6): from the packaged
+    app it points at the self-contained bundle binary; from a source checkout it
+    points at the venv's python + this script. A plain symlink to the source
+    script would instead be run by ``/usr/bin/env python3`` (often the system
+    Python, which lacks the deps).
+
+    Tries ``/usr/local/bin`` first, then ``~/.local/bin``, then ``~/bin`` — the
+    first directory it can write to wins.
 
     Returns:
-        tuple[pathlib.Path, str]: the created link, and a note (empty unless the
-        chosen directory is not on PATH).
+        tuple[pathlib.Path, str]: the created command, and a note (empty unless
+        the chosen directory is not on PATH).
 
     Raises:
         RuntimeError: if none of the candidate directories are writable.
     """
     from pathlib import Path
 
-    link_name = "millenia-ctl"
-    target = Path(sys.executable if getattr(sys, "frozen", False)
-                  else __file__).resolve()
+    name = "millenia-ctl"
+    # Use sys.executable verbatim — do NOT resolve() it: a venv's python is a
+    # symlink to the base interpreter, and following it would drop the venv's
+    # site-packages (i.e. lose mytk >= 1.6).
+    if getattr(sys, "frozen", False):
+        # Packaged app: the bundle binary is self-contained; it dispatches to
+        # CLI mode when its first argument is "ctl".
+        command = '"{0}"'.format(sys.executable)
+    else:
+        # Source checkout: run this script with the interpreter running us now
+        # (the venv python), not whatever a shebang would resolve to.
+        command = '"{0}" "{1}"'.format(sys.executable, Path(__file__).resolve())
+    wrapper = '#!/bin/sh\nexec {0} ctl "$@"\n'.format(command)
+
     candidates = [
         Path("/usr/local/bin"),
         Path.home() / ".local" / "bin",
@@ -723,12 +739,13 @@ def install_millenia_ctl():
 
     problems = []
     for directory in candidates:
-        link = directory / link_name
+        entry = directory / name
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            if link.is_symlink() or link.exists():
-                link.unlink()
-            link.symlink_to(target)
+            if entry.is_symlink() or entry.exists():
+                entry.unlink()
+            entry.write_text(wrapper)
+            entry.chmod(0o755)
         except OSError as err:
             problems.append("{0} ({1})".format(directory, err))
             continue
@@ -737,7 +754,7 @@ def install_millenia_ctl():
         if str(directory) not in os.environ.get("PATH", "").split(os.pathsep):
             note = ("{0} is not on your PATH — add it to your shell profile:\n"
                     "    export PATH=\"{0}:$PATH\"".format(directory))
-        return link, note
+        return entry, note
 
     raise RuntimeError(
         "Could not write millenia-ctl to any of:\n  " + "\n  ".join(problems))
