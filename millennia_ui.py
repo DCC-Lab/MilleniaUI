@@ -30,9 +30,18 @@ Run:
     python millennia_ui.py                 # discover the connected laser
     python millennia_ui.py --port /dev/cu.usbmodemXXXX
     python millennia_ui.py --simulate      # no hardware needed
+
+The same executable is also a command-line remote for a *running* app (it talks
+to the RPC server RemoteControllable exposes):
+
+    python millennia_ui.py ctl status      # on/off/open/close/status
+    python millennia_ui.py install-cli     # add a `millenia-ctl` command to PATH
+    millenia-ctl on                        # once installed
 """
 
 import argparse
+import os
+import sys
 from contextlib import suppress
 
 from mytk import (
@@ -594,7 +603,129 @@ class MillenniaApp(App, RemoteControllable):
         )
 
 
+# -- millenia-ctl : command-line remote control ------------------------------
+
+CTL_ACTIONS = {
+    "on": "turn_on",
+    "off": "turn_off",
+    "open": "open_shutter",
+    "close": "close_shutter",
+}
+
+
+def cli_main(argv):
+    """``millenia-ctl`` — drive a *running* MilleniaUI app over its RPC server.
+
+    This is the same executable as the GUI, invoked either through the
+    ``millenia-ctl`` symlink (see :func:`install_cli`) or as ``… ctl <cmd>``.
+    It only talks to an already-running app, so it stays lightweight (the
+    transport is stdlib XML-RPC via ``mytk.connect``).
+    """
+    parser = argparse.ArgumentParser(
+        prog="millenia-ctl",
+        description="Control a running MilleniaUI laser application over its "
+                    "remote-control (RPC) server.",
+    )
+    parser.add_argument(
+        "command", choices=["status", "on", "off", "open", "close"],
+        help="status; on/off (pump diodes); open/close (shutter).",
+    )
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Server host (default 127.0.0.1).")
+    parser.add_argument("--port", type=int, default=8777,
+                        help="Server port (default 8777).")
+    args = parser.parse_args(argv)
+
+    import mytk
+
+    try:
+        remote = mytk.connect(host=args.host, port=args.port,
+                              app_name="Millennia eV Control")
+    except mytk.RemoteAppMismatch as err:
+        print("Reached a server, but it is not MilleniaUI: {0}".format(err),
+              file=sys.stderr)
+        return 2
+    except Exception as err:  # connection refused, etc.
+        print("Cannot reach MilleniaUI at {0}:{1} — is the app running with its "
+              "remote server enabled (i.e. not launched with --no-remote)? [{2}]"
+              .format(args.host, args.port, err), file=sys.stderr)
+        return 2
+
+    try:
+        if args.command == "status":
+            status = remote.status()
+            width = max((len(k) for k in status), default=0)
+            for key, value in status.items():
+                print("{0:<{1}}  {2}".format(key, width, value))
+        else:
+            method = CTL_ACTIONS[args.command]
+            getattr(remote, method)()
+            print("Sent: {0}".format(method))
+    except Exception as err:
+        print("Remote call failed: {0}".format(err), file=sys.stderr)
+        return 1
+    return 0
+
+
+def install_cli():
+    """Install a ``millenia-ctl`` command on the user's PATH.
+
+    Symlinks ``millenia-ctl`` to this program (the app bundle's binary when
+    frozen, else the source script). The link dispatches to CLI mode because
+    :func:`main` inspects its own invoked name. Tries ``/usr/local/bin`` first,
+    then ``~/.local/bin``, then ``~/bin`` — the first directory it can write to
+    wins — so it works with or without admin rights.
+    """
+    from pathlib import Path
+
+    link_name = "millenia-ctl"
+    target = Path(sys.executable if getattr(sys, "frozen", False)
+                  else __file__).resolve()
+    candidates = [
+        Path("/usr/local/bin"),
+        Path.home() / ".local" / "bin",
+        Path.home() / "bin",
+    ]
+
+    problems = []
+    for directory in candidates:
+        link = directory / link_name
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(target)
+        except OSError as err:
+            problems.append("{0} ({1})".format(directory, err))
+            continue
+
+        print("Installed {0} -> {1}".format(link, target))
+        if str(directory) not in os.environ.get("PATH", "").split(os.pathsep):
+            print("\nNote: {0} is not on your PATH. Add it to your shell "
+                  "profile:\n    export PATH=\"{0}:$PATH\"".format(directory))
+        print("\nThen, with the app running:\n    {0} status".format(link_name))
+        return 0
+
+    print("Could not install {0}. Tried:".format(link_name), file=sys.stderr)
+    for problem in problems:
+        print("  " + problem, file=sys.stderr)
+    return 1
+
+
 def main():
+    """Entry point: dispatch to the CLI, the installer, or the GUI."""
+    invoked = os.path.basename(sys.argv[0]).lower()
+    if invoked.startswith("millenia-ctl"):
+        return cli_main(sys.argv[1:])
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "ctl":
+            return cli_main(sys.argv[2:])
+        if sys.argv[1] == "install-cli":
+            return install_cli()
+    return gui_main()
+
+
+def gui_main():
     parser = argparse.ArgumentParser(description="Millennia eV laser control GUI")
     parser.add_argument(
         "--version", action="version", version="MilleniaUI {0}".format(__version__),
@@ -645,4 +776,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
