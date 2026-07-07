@@ -65,13 +65,18 @@ jobs:
 
       # --- one build step per OS (the long flag list cannot be shared across
       #     bash and PowerShell, and the icon format differs per platform) ---
+      #
+      # --icon / --version-file MUST be absolute: with --specpath packaging,
+      # PyInstaller executes the generated spec from packaging/, so a
+      # packaging-relative path (e.g. packaging/MilleniaUI.ico) re-resolves to
+      # packaging/packaging/... and the build fails (FileNotFoundError).
 
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
           pyinstaller --windowed --name MilleniaUI --noconfirm \
             --osx-bundle-identifier ca.ulaval.cervo.milleniaui \
-            --icon packaging/MilleniaUI.icns \
+            --icon "${{ github.workspace }}/packaging/MilleniaUI.icns" \
             --distpath packaging/dist --workpath packaging/build --specpath packaging \
             --collect-submodules PIL \
             --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib \
@@ -98,8 +103,8 @@ jobs:
         if: runner.os == 'Windows'
         run: >
           pyinstaller --windowed --name MilleniaUI --noconfirm
-          --icon packaging/MilleniaUI.ico
-          --version-file packaging/windows_version_info.txt
+          --icon "${{ github.workspace }}/packaging/MilleniaUI.ico"
+          --version-file "${{ github.workspace }}/packaging/windows_version_info.txt"
           --distpath packaging/dist --workpath packaging/build --specpath packaging
           --collect-submodules PIL
           --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib
