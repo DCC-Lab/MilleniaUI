@@ -123,7 +123,7 @@ class MillenniaApp(App, RemoteControllable):
         self.remote_port = remote_port
 
         # Last known truth, so a button click can send the *opposite* action.
-        # These drive *derived* UI (lamps, button labels, enablement) and are
+        # These drive *derived* UI (indicators, button labels, enablement) and are
         # observed rather than value-bound (see _bind_state_to_ui).
         self.connected = False
         self.monitoring = False  # disconnected but auto-reconnecting
@@ -178,8 +178,8 @@ class MillenniaApp(App, RemoteControllable):
         diode_box = Box(label="Pump Diodes")
         diode_box.grid_into(window, column=0, row=0, padx=8, pady=6, sticky="nsew")
 
-        self.diode_lamp = BooleanIndicator(diameter=18)
-        self.diode_lamp.grid_into(diode_box, column=0, row=0, padx=8, pady=8)
+        self.diode_indicator = BooleanIndicator(diameter=18)
+        self.diode_indicator.grid_into(diode_box, column=0, row=0, padx=8, pady=8)
         self.diode_state_label = Label(text="—")
         self.diode_state_label.grid_into(diode_box, column=1, row=0,
                                          padx=4, pady=8, sticky="w")
@@ -193,8 +193,8 @@ class MillenniaApp(App, RemoteControllable):
         shutter_box = Box(label="Shutter")
         shutter_box.grid_into(window, column=1, row=0, padx=8, pady=6, sticky="nsew")
 
-        self.shutter_lamp = BooleanIndicator(diameter=18)
-        self.shutter_lamp.grid_into(shutter_box, column=0, row=0, padx=8, pady=8)
+        self.shutter_indicator = BooleanIndicator(diameter=18)
+        self.shutter_indicator.grid_into(shutter_box, column=0, row=0, padx=8, pady=8)
         self.shutter_state_label = Label(text="—")
         self.shutter_state_label.grid_into(shutter_box, column=1, row=0,
                                            padx=4, pady=8, sticky="w")
@@ -246,7 +246,7 @@ class MillenniaApp(App, RemoteControllable):
 
     # -- state <-> UI binding (Bindable mixin) --
 
-    # Raw state that drives *derived* UI (tri-state lamps, ON/OFF text, button
+    # Raw state that drives *derived* UI (tri-state indicators, ON/OFF text, button
     # labels/enablement, status colour). It cannot be value-bound 1:1, so we
     # observe it and recompute in observed_property_changed instead.
     DERIVED_TRIGGERS = frozenset(
@@ -285,9 +285,9 @@ class MillenniaApp(App, RemoteControllable):
 
     def _refresh_ui(self):
         """Recompute every piece of derived UI from the current state."""
-        self._apply_lamp(self.diode_lamp, self.diode_state_label,
+        self._apply_indicator(self.diode_indicator, self.diode_state_label,
                          self.diodes_on, "ON", "OFF")
-        self._apply_lamp(self.shutter_lamp, self.shutter_state_label,
+        self._apply_indicator(self.shutter_indicator, self.shutter_state_label,
                          self.shutter_open, "OPEN", "CLOSED")
 
         color = self.STATUS_COLORS.get(self.status_kind, "#000000")
@@ -426,8 +426,8 @@ class MillenniaApp(App, RemoteControllable):
         return "Could not connect: {0}".format(error or type(error).__name__)
 
     @staticmethod
-    def _apply_lamp(lamp, label, value, true_text, false_text):
-        lamp.value_variable.set(bool(value) if value is not None else False)
+    def _apply_indicator(indicator, label, value, true_text, false_text):
+        indicator.value_variable.set(bool(value) if value is not None else False)
         label.value_variable.set(
             "—" if value is None else (true_text if value else false_text)
         )
