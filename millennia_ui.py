@@ -43,6 +43,7 @@ import argparse
 import os
 import sys
 from contextlib import suppress
+from tkinter import Menu
 
 from mytk import (
     App,
@@ -602,6 +603,32 @@ class MillenniaApp(App, RemoteControllable):
             message="There are no preferences for this application.",
         )
 
+    def create_menu(self):
+        """Extend the base menu bar with a Tools ▸ Install command-line tool item."""
+        super().create_menu()
+        menubar = self.root.nametowidget(self.root["menu"])
+        tools = Menu(menubar, tearoff=0)
+        tools.add_command(
+            label="Install “millenia-ctl” Command…",
+            command=self._install_cli_from_menu,
+        )
+        menubar.add_cascade(label="Tools", menu=tools)
+
+    def _install_cli_from_menu(self):
+        """Menu action: install the millenia-ctl command and report via a dialog."""
+        try:
+            link, note = install_millenia_ctl()
+        except RuntimeError as err:
+            Dialog.showerror(
+                title="Could not install millenia-ctl", message=str(err))
+            return
+        message = ("Installed the command:\n\n    {0}\n\nUse it from a terminal "
+                   "while this app is running, e.g.\n    millenia-ctl status"
+                   .format(link))
+        if note:
+            message += "\n\n" + note
+        Dialog.showinfo(title="millenia-ctl installed", message=message)
+
 
 # -- millenia-ctl : command-line remote control ------------------------------
 
@@ -667,14 +694,21 @@ def cli_main(argv):
     return 0
 
 
-def install_cli():
-    """Install a ``millenia-ctl`` command on the user's PATH.
+def install_millenia_ctl():
+    """Symlink a ``millenia-ctl`` command onto PATH; return ``(link, note)``.
 
-    Symlinks ``millenia-ctl`` to this program (the app bundle's binary when
-    frozen, else the source script). The link dispatches to CLI mode because
-    :func:`main` inspects its own invoked name. Tries ``/usr/local/bin`` first,
-    then ``~/.local/bin``, then ``~/bin`` — the first directory it can write to
-    wins — so it works with or without admin rights.
+    The link points at this program (the app bundle's binary when frozen, else
+    the source script) and dispatches to CLI mode because :func:`main` inspects
+    its own invoked name. Tries ``/usr/local/bin`` first, then ``~/.local/bin``,
+    then ``~/bin`` — the first directory it can write to wins — so it works with
+    or without admin rights.
+
+    Returns:
+        tuple[pathlib.Path, str]: the created link, and a note (empty unless the
+        chosen directory is not on PATH).
+
+    Raises:
+        RuntimeError: if none of the candidate directories are writable.
     """
     from pathlib import Path
 
@@ -699,17 +733,28 @@ def install_cli():
             problems.append("{0} ({1})".format(directory, err))
             continue
 
-        print("Installed {0} -> {1}".format(link, target))
+        note = ""
         if str(directory) not in os.environ.get("PATH", "").split(os.pathsep):
-            print("\nNote: {0} is not on your PATH. Add it to your shell "
-                  "profile:\n    export PATH=\"{0}:$PATH\"".format(directory))
-        print("\nThen, with the app running:\n    {0} status".format(link_name))
-        return 0
+            note = ("{0} is not on your PATH — add it to your shell profile:\n"
+                    "    export PATH=\"{0}:$PATH\"".format(directory))
+        return link, note
 
-    print("Could not install {0}. Tried:".format(link_name), file=sys.stderr)
-    for problem in problems:
-        print("  " + problem, file=sys.stderr)
-    return 1
+    raise RuntimeError(
+        "Could not write millenia-ctl to any of:\n  " + "\n  ".join(problems))
+
+
+def install_cli():
+    """CLI wrapper around :func:`install_millenia_ctl` (prints, returns a code)."""
+    try:
+        link, note = install_millenia_ctl()
+    except RuntimeError as err:
+        print(err, file=sys.stderr)
+        return 1
+    print("Installed {0}".format(link))
+    if note:
+        print("\nNote: " + note)
+    print("\nThen, with the app running:\n    millenia-ctl status")
+    return 0
 
 
 def main():
