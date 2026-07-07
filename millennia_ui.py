@@ -43,7 +43,7 @@ import argparse
 import os
 import sys
 from contextlib import suppress
-from tkinter import Menu
+from tkinter import TclError
 
 from mytk import (
     App,
@@ -604,15 +604,21 @@ class MillenniaApp(App, RemoteControllable):
         )
 
     def create_menu(self):
-        """Extend the base menu bar with a Tools ▸ Install command-line tool item."""
+        """Add an "Install millenia-ctl" item to the File menu (above Quit)."""
         super().create_menu()
         menubar = self.root.nametowidget(self.root["menu"])
-        tools = Menu(menubar, tearoff=0)
-        tools.add_command(
-            label="Install “millenia-ctl” Command…",
-            command=self._install_cli_from_menu,
-        )
-        menubar.add_cascade(label="Tools", menu=tools)
+        file_menu = self.root.nametowidget(menubar.entrycget("File", "menu"))
+        label = "Install “millenia-ctl” Command…"
+        try:
+            quit_index = file_menu.index("Quit")
+            file_menu.insert_separator(quit_index)
+            file_menu.insert_command(quit_index + 1, label=label,
+                                     command=self._install_cli_from_menu)
+        except TclError:
+            # No "Quit" entry to anchor to; just append.
+            file_menu.add_separator()
+            file_menu.add_command(label=label,
+                                  command=self._install_cli_from_menu)
 
     def _install_cli_from_menu(self):
         """Menu action: install the millenia-ctl command and report via a dialog."""
