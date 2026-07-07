@@ -23,13 +23,13 @@ Windows "Spectra-Physics" app), the status line says so explicitly instead of
 failing silently. Use the Simulator checkbox to drive a DebugMillenniaDevice
 when no hardware is reachable.
 
-The Millennia is addressed by an explicit serial port (--port): the library
-does not discover it by USB id, because the eV's STM32 virtual COM port uses a
-generic identity shared by unrelated boards.
+The connected laser is discovered by the driver; pass --port only to pin a
+specific serial port.
 
 Run:
-    python millennia_ui.py --port /dev/cu.usbmodemXXXX   # the real laser
-    python millennia_ui.py --simulate                    # no hardware needed
+    python millennia_ui.py                 # discover the connected laser
+    python millennia_ui.py --port /dev/cu.usbmodemXXXX
+    python millennia_ui.py --simulate      # no hardware needed
 """
 
 import argparse
@@ -65,11 +65,10 @@ try:
 except Exception:
     __version__ = "0.0.0+dev"
 
-# USB VID/PID and port matching are intentionally NOT handled here: the
-# Millennia's back-panel port enumerates as a *generic* STM32 Virtual COM Port
-# (0x0483:0x5740), an identity shared by unrelated boards, so PyHardwareLibrary
-# deliberately addresses the eV by an explicit portPath rather than discovering
-# it. The laser is therefore reached via --port (see _make_device).
+# Device discovery is PyHardwareLibrary's job, not the app's: MillenniaDevice()
+# finds the connected laser itself (by its own criteria). We only pass a
+# portPath when the user pins one with --port. Keeping USB-id knowledge in the
+# driver also avoids matching the eV's generic STM32 identity from here.
 
 
 # Serial-error classification (busy / permission / missing) now lives in
@@ -302,14 +301,15 @@ class MillenniaApp(App, RemoteControllable):
     def _make_device(self, simulate, port):
         """Build the PhysicalDevice the controller will drive.
 
-        The real laser is addressed by an explicit ``portPath`` (--port): the
-        library does not discover the Millennia by USB id (its STM32 identity is
-        generic). With no port, initializeDevice() fails and the
-        DeviceController surfaces it as a connectionFailed we explain.
+        A port path is optional: with --port it is pinned, otherwise the device
+        discovers the connected laser itself (MillenniaDevice knows how to find
+        its instance). DebugMillenniaDevice is used in --simulate.
         """
         if simulate:
             return DebugMillenniaDevice()
-        return MillenniaDevice(portPath=port)
+        if port:
+            return MillenniaDevice(portPath=port)
+        return MillenniaDevice()
 
     def _start_controller(self):
         """Create the DeviceController for the current device and connect.
@@ -409,7 +409,8 @@ class MillenniaApp(App, RemoteControllable):
             label += "   fw {0}".format(firmware)
         return label
 
-    def _connection_message(self, error):
+    @staticmethod
+    def _connection_message(error):
         """Turn a connect failure into a user-facing line via the driver's
         preserved error chain (connectionErrorReason from PyHardwareLibrary)."""
         reason = connectionErrorReason(error)
@@ -420,12 +421,9 @@ class MillenniaApp(App, RemoteControllable):
         if reason == "permission":
             return "Permission denied opening the laser's serial port."
         if reason == "missing":
-            return ("The laser's serial port is not available. Waiting for it "
-                    "to reappear…")
-        if not self.simulate_arg and not self.port_arg:
-            return ("No serial port specified — launch with --port "
-                    "/dev/cu.usbmodemXXXX to reach the laser.")
-        return "Could not connect: {0}".format(error)
+            return ("The laser is not available (no connected Millennia found). "
+                    "Waiting for it to reappear…")
+        return "Could not connect: {0}".format(error or type(error).__name__)
 
     @staticmethod
     def _apply_lamp(lamp, label, value, true_text, false_text):
@@ -586,8 +584,8 @@ def main():
     )
     parser.add_argument(
         "--port", default=None,
-        help="Serial port path of the laser (e.g. /dev/cu.usbmodemXXXX); "
-             "required for the real hardware.",
+        help="Serial port path to pin (e.g. /dev/cu.usbmodemXXXX); optional — "
+             "the connected laser is auto-discovered if omitted.",
     )
     parser.add_argument(
         "--no-remote", action="store_true",
