@@ -123,16 +123,22 @@ class MillenniaApp(App, RemoteControllable):
         self.remote_port = remote_port
 
         # Last known truth, so a button click can send the *opposite* action.
-        # These drive *derived* UI (indicators, button labels, enablement) and are
-        # observed rather than value-bound (see _bind_state_to_ui).
+        # These drive *derived* UI (button labels/enablement, status colour) and
+        # are observed rather than value-bound (see _bind_state_to_ui).
         self.connected = False
         self.monitoring = False  # disconnected but auto-reconnecting
         self.busy = False
-        self.diodes_on = None
-        self.shutter_open = None
+        # Whether each laser state is currently known (False before the first
+        # poll and after a drop); drives the "—" text and disables the buttons.
+        self.diode_known = False
+        self.shutter_known = False
 
         # Displayed state value-bound 1:1 to widgets via the Bindable mixin:
         # assigning any of these pushes the value straight to its widget(s).
+        # diode_on / shutter_open feed the on/off indicators, so they are plain
+        # bools (never None — a BooleanVar cannot hold None).
+        self.diode_on = False
+        self.shutter_open = False
         self.power = 0.0
         self.identity = ""
         self.status = "Starting…"
@@ -246,12 +252,14 @@ class MillenniaApp(App, RemoteControllable):
 
     # -- state <-> UI binding (Bindable mixin) --
 
-    # Raw state that drives *derived* UI (tri-state indicators, ON/OFF text, button
-    # labels/enablement, status colour). It cannot be value-bound 1:1, so we
-    # observe it and recompute in observed_property_changed instead.
+    # State that drives *derived* UI (ON/OFF text, button labels/enablement,
+    # status colour) which cannot be value-bound 1:1, so we observe it and
+    # recompute in observed_property_changed. diode_on/shutter_open appear here
+    # too: besides driving their (value-bound) indicators, they change the button
+    # labels and the ON/OFF text.
     DERIVED_TRIGGERS = frozenset(
-        {"connected", "monitoring", "busy", "diodes_on", "shutter_open",
-         "status_kind"}
+        {"connected", "monitoring", "busy", "diode_on", "diode_known",
+         "shutter_open", "shutter_known", "status_kind"}
     )
 
     def _bind_state_to_ui(self):
@@ -267,6 +275,8 @@ class MillenniaApp(App, RemoteControllable):
         exists once the widget has been placed on screen.
         """
         # Direct value bindings — one property, possibly several widgets.
+        self.bind_property_to_widget_value("diode_on", self.diode_indicator)
+        self.bind_property_to_widget_value("shutter_open", self.shutter_indicator)
         self.bind_property_to_widget_value("power", self.power_indicator)
         self.bind_property_to_widget_value("power", self.power_level)
         self.bind_property_to_widget_value("identity", self.identity_label)
@@ -284,11 +294,16 @@ class MillenniaApp(App, RemoteControllable):
             self._refresh_ui()
 
     def _refresh_ui(self):
-        """Recompute every piece of derived UI from the current state."""
-        self._apply_indicator(self.diode_indicator, self.diode_state_label,
-                         self.diodes_on, "ON", "OFF")
-        self._apply_indicator(self.shutter_indicator, self.shutter_state_label,
-                         self.shutter_open, "OPEN", "CLOSED")
+        """Recompute the derived UI from the current state.
+
+        The on/off indicators are value-bound to diode_on / shutter_open, so
+        they need no work here — only the tri-state *text* ("—"/ON/OFF), the
+        status colour, and the buttons are functions of state.
+        """
+        self.diode_state_label.value_variable.set(
+            self._state_text(self.diode_known, self.diode_on, "ON", "OFF"))
+        self.shutter_state_label.value_variable.set(
+            self._state_text(self.shutter_known, self.shutter_open, "OPEN", "CLOSED"))
 
         color = self.STATUS_COLORS.get(self.status_kind, "#000000")
         with suppress(Exception):
@@ -359,8 +374,12 @@ class MillenniaApp(App, RemoteControllable):
             self.status = "Connected"
             self.status_kind = "ok"
         elif name is N.status:
-            self.diodes_on = user_info.get("isLaserOn")
-            self.shutter_open = user_info.get("isShutterOpen")
+            laser_on = user_info.get("isLaserOn")
+            shutter_open = user_info.get("isShutterOpen")
+            self.diode_on = bool(laser_on)
+            self.diode_known = laser_on is not None
+            self.shutter_open = bool(shutter_open)
+            self.shutter_known = shutter_open is not None
             power = user_info.get("power")
             self.power = power if power is not None else 0.0
             self.busy = False
@@ -375,9 +394,7 @@ class MillenniaApp(App, RemoteControllable):
             self.monitoring = False
             self.busy = False
             self.identity = ""
-            self.diodes_on = None
-            self.shutter_open = None
-            self.power = 0.0
+            self._clear_laser_state()
             self.status = "Disconnected"
             self.status_kind = "info"
         elif name is N.commandFailed:
@@ -385,14 +402,20 @@ class MillenniaApp(App, RemoteControllable):
             self.status = "Command failed: {0}".format(user_info)
             self.status_kind = "error"
 
+    def _clear_laser_state(self):
+        """Mark the laser state unknown (indicators off, "—" text, power 0)."""
+        self.diode_on = False
+        self.diode_known = False
+        self.shutter_open = False
+        self.shutter_known = False
+        self.power = 0.0
+
     def _enter_monitoring(self, message):
         """Common state for a lost/failed connection that will be retried."""
         self.connected = False
         self.monitoring = self.controller.autoReconnect
         self.busy = False
-        self.diodes_on = None
-        self.shutter_open = None
-        self.power = 0.0
+        self._clear_laser_state()
         self.status = message
         self.status_kind = "warn"
 
@@ -426,11 +449,9 @@ class MillenniaApp(App, RemoteControllable):
         return "Could not connect: {0}".format(error or type(error).__name__)
 
     @staticmethod
-    def _apply_indicator(indicator, label, value, true_text, false_text):
-        indicator.value_variable.set(bool(value) if value is not None else False)
-        label.value_variable.set(
-            "—" if value is None else (true_text if value else false_text)
-        )
+    def _state_text(known, value, true_text, false_text):
+        """The tri-state label text: "—" when unknown, else true/false text."""
+        return "—" if not known else (true_text if value else false_text)
 
     # -- control enable/disable + button labels --
 
@@ -443,11 +464,11 @@ class MillenniaApp(App, RemoteControllable):
         self.connect_button.label = (
             "Disconnect" if (connected or self.monitoring) else "Connect"
         )
-        self.diode_button.is_disabled = not idle or self.diodes_on is None
-        self.shutter_button.is_disabled = not idle or self.shutter_open is None
+        self.diode_button.is_disabled = not idle or not self.diode_known
+        self.shutter_button.is_disabled = not idle or not self.shutter_known
 
         self.diode_button.label = (
-            "Turn Off" if self.diodes_on else "Turn On"
+            "Turn Off" if self.diode_on else "Turn On"
         )
         self.shutter_button.label = (
             "Close Shutter" if self.shutter_open else "Open Shutter"
@@ -464,12 +485,12 @@ class MillenniaApp(App, RemoteControllable):
             self.controller.connect()
 
     def _on_diode_clicked(self, event, button):
-        if self.diodes_on is None:
+        if not self.diode_known:
             return
-        self.turn_off() if self.diodes_on else self.turn_on()
+        self.turn_off() if self.diode_on else self.turn_on()
 
     def _on_shutter_clicked(self, event, button):
-        if self.shutter_open is None:
+        if not self.shutter_known:
             return
         self.close_shutter() if self.shutter_open else self.open_shutter()
 
@@ -541,8 +562,8 @@ class MillenniaApp(App, RemoteControllable):
             "connected": self.connected,
             "monitoring": self.monitoring,
             "busy": self.busy,
-            "diodes_on": self.diodes_on,
-            "shutter_open": self.shutter_open,
+            "diodes_on": self.diode_on if self.diode_known else None,
+            "shutter_open": self.shutter_open if self.shutter_known else None,
             "power": self.power,
             "status": self.status,
             "identity": self.identity,
