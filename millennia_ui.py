@@ -29,6 +29,7 @@ import argparse
 import queue
 import threading
 import time
+from contextlib import suppress
 
 import serial
 
@@ -37,11 +38,12 @@ from mytk import (
     BooleanIndicator,
     Box,
     Button,
+    Dialog,
     Label,
     Level,
     NumericIndicator,
+    RemoteControllable,
 )
-from tkinter import DoubleVar
 
 from hardwarelibrary.sources.millennia import (
     MillenniaDevice,
@@ -423,8 +425,31 @@ class MillenniaController:
         return "Could not connect: {0}".format(exception_chain_text(err) or err)
 
 
-class MillenniaApp:
-    """Builds the window and wires the widgets to the controller."""
+def remote_command(fct=None, *, name=None):
+    """Mark a method for remote exposure by ``_register_remote_api``.
+
+    This is only a *tag*: it records the RPC name on the function and returns it
+    unchanged. The actual registration happens at runtime, once an instance (and
+    its ``self.remote`` registry) exists — ``@app.remote`` cannot be used in the
+    class body because there is no live app there yet. Use bare
+    (``@remote_command``) or with an explicit name (``@remote_command(name="status")``).
+    """
+    if fct is None:
+        return lambda f: remote_command(f, name=name)
+    fct._remote_name = name or fct.__name__
+    return fct
+
+
+class MillenniaApp(App, RemoteControllable):
+    """A myTk App that builds the window and wires the widgets to the controller.
+
+    Mixes in `RemoteControllable`, so the laser commands (turn_on, turn_off,
+    open_shutter, close_shutter) and a status query are reachable over RPC from
+    another process via ``mytk.connect(...)`` (localhost only, see
+    :meth:`_register_remote_api`).
+    """
+
+    HELP_URL = "https://github.com/DCC-Lab/MilleniaUI"
 
     MAX_POWER = 30.0  # full-scale of the power Level bar (W)
 
@@ -435,36 +460,58 @@ class MillenniaApp:
         "error": "#cf222e",
     }
 
-    def __init__(self, simulate=False, port=None):
+    def __init__(self, simulate=False, port=None, remote=True, remote_port=8777):
         self.simulate_arg = simulate
         self.port_arg = port
+        self.remote_enabled = remote
+        self.remote_port = remote_port
 
         # Last known truth, so a button click can send the *opposite* action.
+        # These drive *derived* UI (lamps, button labels, enablement) and are
+        # observed rather than value-bound (see _bind_state_to_ui).
         self.connected = False
         self.monitoring = False  # disconnected but auto-reconnecting
         self.busy = False
         self.diodes_on = None
         self.shutter_open = None
 
-        self.app = App(geometry="640x460", name="Millennia eV Control")
-        self.app.window.widget.title(
+        # Displayed state value-bound 1:1 to widgets via the Bindable mixin:
+        # assigning any of these pushes the value straight to its widget(s).
+        self.power = 0.0
+        self.identity = ""
+        self.status = "Starting…"
+        self.status_kind = "info"
+
+        super().__init__(
+            geometry="640x460",
+            name="Millennia eV Control",
+            help_url=self.HELP_URL,
+        )
+        # App titles the window from `name`; use a richer title with the version.
+        self.root.title(
             "Millennia eV — Laser Control  (v{0})".format(__version__))
 
         self.controller = MillenniaController(on_state=self._on_state_from_worker)
 
         self._build_ui()
+        self._bind_state_to_ui()
 
-        self.app.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Clicking the window's close box routes through quit() so the worker
+        # thread and device are released cleanly.
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
         self.controller.start()
 
+        # Expose the laser commands over RPC (localhost) if enabled.
+        self._register_remote_api()
+
         # Auto-connect on launch using the CLI arguments.
-        self._update_controls_enabled()
+        self._refresh_ui()
         self.controller.connect(self.simulate_arg, self.port_arg)
 
     # -- UI construction --
 
     def _build_ui(self):
-        window = self.app.window
+        window = self.window
 
         # --- Diodes (On/Off) -------------------------------------------
         diode_box = Box(label="Pump Diodes")
@@ -501,10 +548,9 @@ class MillenniaApp:
         power_box.grid_into(window, column=0, row=1, columnspan=2,
                             padx=8, pady=6, sticky="nsew")
 
-        self.power_var = DoubleVar(value=0.0)
-        self.power_indicator = NumericIndicator(
-            value_variable=self.power_var, format_string="{0:.2f} W"
-        )
+        # No explicit value_variable: NumericIndicator makes its own, and
+        # _bind_state_to_ui binds our `power` property to it.
+        self.power_indicator = NumericIndicator(format_string="{0:.2f} W")
         self.power_indicator.grid_into(power_box, column=0, row=0,
                                        padx=8, pady=(8, 2), sticky="w")
 
@@ -543,51 +589,79 @@ class MillenniaApp:
 
         window.all_resize_weight(1)
 
+    # -- state <-> UI binding (Bindable mixin) --
+
+    # Raw state that drives *derived* UI (tri-state lamps, ON/OFF text, button
+    # labels/enablement, status colour). It cannot be value-bound 1:1, so we
+    # observe it and recompute in observed_property_changed instead.
+    DERIVED_TRIGGERS = frozenset(
+        {"connected", "monitoring", "busy", "diodes_on", "shutter_open",
+         "status_kind"}
+    )
+
+    def _bind_state_to_ui(self):
+        """Connect model state to widgets with the Bindable mixin.
+
+        Two-way value bindings keep a property and a widget's ``value_variable``
+        synchronised automatically, so assigning the property updates the widget
+        (and vice-versa). State that first needs a transformation before it can
+        be shown is handled by observing it and recomputing the derived UI in
+        :meth:`observed_property_changed`.
+
+        Must run after :meth:`_build_ui`: a widget's ``value_variable`` only
+        exists once the widget has been placed on screen.
+        """
+        # Direct value bindings — one property, possibly several widgets.
+        self.bind_property_to_widget_value("power", self.power_indicator)
+        self.bind_property_to_widget_value("power", self.power_level)
+        self.bind_property_to_widget_value("identity", self.identity_label)
+        self.bind_property_to_widget_value("status", self.status_label)
+
+        # Derived UI — observe the raw state; recompute in the callback.
+        for name in self.DERIVED_TRIGGERS:
+            self.add_observer(self, name)
+
+    def observed_property_changed(self, observed, name, value, context):
+        # Let Bindable service the two-way value bindings first...
+        super().observed_property_changed(observed, name, value, context)
+        # ...then recompute anything that is a *function* of the raw state.
+        if name in self.DERIVED_TRIGGERS:
+            self._refresh_ui()
+
+    def _refresh_ui(self):
+        """Recompute every piece of derived UI from the current state."""
+        self._apply_lamp(self.diode_lamp, self.diode_state_label,
+                         self.diodes_on, "ON", "OFF")
+        self._apply_lamp(self.shutter_lamp, self.shutter_state_label,
+                         self.shutter_open, "OPEN", "CLOSED")
+
+        color = self.STATUS_COLORS.get(self.status_kind, "#000000")
+        with suppress(Exception):
+            self.status_label.widget.configure(foreground=color)
+
+        self._update_controls_enabled()
+
     # -- worker -> main thread bridge --
 
     def _on_state_from_worker(self, **fields):
         # Called on the worker thread; bounce onto the Tk main thread.
-        self.app.schedule_on_main_thread(self._apply_state, kwargs=fields)
+        self.schedule_on_main_thread(self._apply_state, kwargs=fields)
 
     def _apply_state(self, **fields):
-        if "status" in fields:
-            self.status_label.value_variable.set(fields["status"])
-            kind = fields.get("status_kind", "info")
-            color = self.STATUS_COLORS.get(kind, "#000000")
-            try:
-                self.status_label.widget.configure(foreground=color)
-            except Exception:
-                pass
+        """Assign incoming worker fields onto the bound state properties.
 
-        if "identity" in fields:
-            self.identity_label.value_variable.set(fields["identity"] or "")
-
-        if "connected" in fields:
-            self.connected = bool(fields["connected"])
-
-        if "monitoring" in fields:
-            self.monitoring = bool(fields["monitoring"])
-
-        if "busy" in fields:
-            self.busy = bool(fields["busy"])
-
-        if "diodes_on" in fields:
-            self.diodes_on = fields["diodes_on"]
-            self._apply_lamp(self.diode_lamp, self.diode_state_label,
-                             self.diodes_on, "ON", "OFF")
-
-        if "shutter_open" in fields:
-            self.shutter_open = fields["shutter_open"]
-            self._apply_lamp(self.shutter_lamp, self.shutter_state_label,
-                             self.shutter_open, "OPEN", "CLOSED")
-
+        The Bindable bindings and observers do the rest: a widget bound to a
+        property updates the moment we assign it, and derived UI is recomputed
+        through :meth:`observed_property_changed`. We only sanitise the two
+        values that must never be ``None`` (a numeric readout and a text label).
+        """
         if "power" in fields:
-            power = fields["power"]
-            value = power if power is not None else 0.0
-            self.power_var.set(value)          # numeric readout
-            self.power_level.value_variable.set(value)  # bar indicator
-
-        self._update_controls_enabled()
+            power = fields.pop("power")
+            self.power = power if power is not None else 0.0
+        if "identity" in fields:
+            self.identity = fields.pop("identity") or ""
+        for name, value in fields.items():
+            setattr(self, name, value)
 
     @staticmethod
     def _apply_lamp(lamp, label, value, true_text, false_text):
@@ -631,43 +705,118 @@ class MillenniaApp:
             self.controller.connect(self.simulate_arg, self.port_arg)
 
     def _on_rescan_clicked(self, event, button):
+        # Just assign the bound state; the binding updates the label text and
+        # the status_kind observer repaints its colour.
         ports = find_millennia_ports()
         if ports:
             self.port_arg = ports[0]
-            self.status_label.value_variable.set(
-                "Found Millennia at {0}. Press Connect.".format(ports[0])
-            )
-            self.status_label.widget.configure(
-                foreground=self.STATUS_COLORS["ok"]
-            )
+            self.status = "Found Millennia at {0}. Press Connect.".format(ports[0])
+            self.status_kind = "ok"
         else:
             self.port_arg = None
-            self.status_label.value_variable.set(
-                "No Millennia serial port found (it may be captured by another "
-                "app, e.g. Spectra-Physics under Parallels)."
-            )
-            self.status_label.widget.configure(
-                foreground=self.STATUS_COLORS["warn"]
-            )
+            self.status = ("No Millennia serial port found (it may be captured "
+                           "by another app, e.g. Spectra-Physics under Parallels).")
+            self.status_kind = "warn"
 
     def _on_diode_clicked(self, event, button):
         if self.diodes_on is None:
             return
-        self.controller.set_diodes(not self.diodes_on)
+        self.turn_off() if self.diodes_on else self.turn_on()
 
     def _on_shutter_clicked(self, event, button):
         if self.shutter_open is None:
             return
-        self.controller.set_shutter(not self.shutter_open)
+        self.close_shutter() if self.shutter_open else self.open_shutter()
 
-    def _on_close(self):
+    # -- laser commands (invoked by the buttons; the surface to be exposed
+    #    over RPC via RemoteControllable). Each just enqueues onto the worker;
+    #    the controller ignores the request when not connected, so these are
+    #    safe to call at any time and take no arguments (RPC-friendly). --
+
+    @remote_command
+    def turn_on(self):
+        """Turn the pump diodes on."""
+        self.controller.set_diodes(True)
+
+    @remote_command
+    def turn_off(self):
+        """Turn the pump diodes off."""
+        self.controller.set_diodes(False)
+
+    @remote_command
+    def open_shutter(self):
+        """Open the shutter."""
+        self.controller.set_shutter(True)
+
+    @remote_command
+    def close_shutter(self):
+        """Close the shutter."""
+        self.controller.set_shutter(False)
+
+    # -- remote control (RemoteControllable) --
+
+    def _register_remote_api(self):
+        """Expose every ``@remote_command`` method over RPC and start the server.
+
+        RemoteControllable marshals each remote call onto the Tk main thread, so
+        the exposed functions are exactly the ones the buttons call. Clients
+        connect with ``mytk.connect(port=..., app_name="Millennia eV Control")``
+        and may call turn_on/turn_off/open_shutter/close_shutter or ``status()``.
+        """
+        if not self.remote_enabled:
+            return
+        # Read the @remote_command tag off the class (not the instance) so we
+        # never trigger a property getter while scanning.
+        for attr_name in dir(type(self)):
+            tagged = getattr(type(self), attr_name, None)
+            remote_name = getattr(tagged, "_remote_name", None)
+            if remote_name is not None:
+                self.remote(getattr(self, attr_name), name=remote_name)
+        bound_port = self.start_remote(port=self.remote_port, app_name=self.name)
+        print("Remote control listening on 127.0.0.1:{0} (app '{1}').".format(
+            bound_port, self.name))
+
+    @remote_command(name="status")
+    def remote_status(self):
+        """Return a snapshot of the laser state for remote clients.
+
+        All values are XML-RPC serializable. ``diodes_on`` / ``shutter_open``
+        are None while unknown (not yet polled, or disconnected).
+        """
+        return {
+            "connected": self.connected,
+            "monitoring": self.monitoring,
+            "busy": self.busy,
+            "diodes_on": self.diodes_on,
+            "shutter_open": self.shutter_open,
+            "power": self.power,
+            "status": self.status,
+            "identity": self.identity,
+        }
+
+    # -- App lifecycle / menu overrides --
+
+    def quit(self):
+        """Release the worker thread and device, then tear the window down."""
         try:
             self.controller.shutdown()
         finally:
-            self.app.quit()
+            super().quit()
 
-    def run(self):
-        self.app.mainloop()
+    def save(self):
+        """No document model to save; the File ▸ Save… menu item is inert here."""
+        Dialog.showinfo(
+            title="Nothing to save",
+            message="This application controls the laser live; there is no "
+                    "document to save.",
+        )
+
+    def preferences(self):
+        """No preferences UI yet."""
+        Dialog.showinfo(
+            title="Preferences",
+            message="There are no preferences for this application.",
+        )
 
 
 def main():
@@ -683,12 +832,25 @@ def main():
         "--port", default=None,
         help="Serial port path (e.g. /dev/cu.usbmodemXXXX). Auto-detected if omitted.",
     )
+    parser.add_argument(
+        "--no-remote", action="store_true",
+        help="Do not start the localhost remote-control (RPC) server.",
+    )
+    parser.add_argument(
+        "--remote-port", type=int, default=8777,
+        help="Port for the remote-control server (default 8777).",
+    )
     # parse_known_args so a stray argument from a Finder/.app launch (e.g. an
     # old-style -psn_ process serial number) never aborts startup.
     args, _ = parser.parse_known_args()
 
     try:
-        MillenniaApp(simulate=args.simulate, port=args.port).run()
+        MillenniaApp(
+            simulate=args.simulate,
+            port=args.port,
+            remote=not args.no_remote,
+            remote_port=args.remote_port,
+        ).mainloop()
     except Exception:
         # A bundled .app has no terminal, so a startup crash would vanish.
         # Record it where the user (or a developer) can find it.

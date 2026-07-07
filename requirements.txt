@@ -1,5 +1,5 @@
 # Millennia eV control GUI dependencies
-mytk
+mytk>=1.6.0   # RemoteControllable / remote RPC server
 pyserial
 # PyHardwareLibrary is not on PyPI; install from the DCC-Lab GitHub repo:
 #   pip install git+https://github.com/DCC-Lab/PyHardwareLibrary.git
