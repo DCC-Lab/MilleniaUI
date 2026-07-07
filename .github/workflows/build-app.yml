@@ -76,6 +76,10 @@ jobs:
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
+          # Ensure a clean, well-formed libusb is present: PyInstaller's pyusb
+          # hook bundles whatever ctypes.find_library('usb-1.0') resolves, and a
+          # stale/malformed system copy makes COLLECT fail. Homebrew's is clean.
+          brew list libusb >/dev/null 2>&1 || brew install libusb
           pyinstaller --windowed --name MilleniaUI --noconfirm \
             --osx-bundle-identifier ca.ulaval.cervo.milleniaui \
             --icon "${{ github.workspace }}/packaging/MilleniaUI.icns" \
