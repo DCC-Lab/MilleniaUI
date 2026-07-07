@@ -8,10 +8,14 @@ driven through PyHardwareLibrary's ``MillenniaDevice``. It offers:
   * a shutter Open/Close button (the mechanical block, SHT:1/SHT:0 / ?SHT),
   * a power monitor showing output power (?P) and the live diode/shutter state.
 
-All serial I/O runs on a single background worker thread so the slow,
-confirm-and-retry actions (the eV does not ack ON/OFF, so the driver writes,
-settles, and reads back -- up to several seconds) never freeze the UI. State
-is pushed back to the Tk main thread via ``App.schedule_on_main_thread``.
+All serial I/O runs on a single background worker thread owned by
+PyHardwareLibrary's ``DeviceController`` (poll, connect, and user commands all
+flow through it), so the slow confirm-and-retry actions (the eV does not ack
+ON/OFF, so the driver writes, settles, and reads back -- up to several seconds)
+never freeze the UI. The controller reports connect/disconnect/status/failure
+through the ``NotificationCenter``; this app observes those and marshals each
+onto the Tk main thread via ``App.schedule_on_main_thread``, where they are
+assigned to Bindable properties that update the widgets automatically.
 
 If the laser's serial port cannot be opened because another program holds it
 (on this bench the eV's USB port is routinely captured by Parallels for the
@@ -19,34 +23,40 @@ Windows "Spectra-Physics" app), the status line says so explicitly instead of
 failing silently. Use the Simulator checkbox to drive a DebugMillenniaDevice
 when no hardware is reachable.
 
+The connected laser is discovered by the driver; pass --port only to pin a
+specific serial port.
+
 Run:
-    python millennia_ui.py                 # auto-detect the Millennia serial port
+    python millennia_ui.py                 # discover the connected laser
     python millennia_ui.py --port /dev/cu.usbmodemXXXX
     python millennia_ui.py --simulate      # no hardware needed
 """
 
 import argparse
-import queue
-import threading
-import time
-
-import serial
+from contextlib import suppress
 
 from mytk import (
     App,
     BooleanIndicator,
     Box,
     Button,
+    Dialog,
     Label,
     Level,
     NumericIndicator,
+    RemoteControllable,
 )
-from tkinter import DoubleVar
 
 from hardwarelibrary.sources.millennia import (
     MillenniaDevice,
     DebugMillenniaDevice,
 )
+from hardwarelibrary.devicecontroller import (
+    DeviceController,
+    DeviceControllerNotification as N,
+    connectionErrorReason,
+)
+from hardwarelibrary.notificationcenter import NotificationCenter
 
 # Version is injected at build time by packaging/make_version.py (from the git
 # tag); falls back to a dev marker when running from a checkout.
@@ -55,376 +65,47 @@ try:
 except Exception:
     __version__ = "0.0.0+dev"
 
-# The eV's back-panel USB port enumerates as a generic STM32 Virtual COM Port.
-MILLENNIA_VID = 0x0483
-MILLENNIA_PID = 0x5740
+# Device discovery is PyHardwareLibrary's job, not the app's: MillenniaDevice()
+# finds the connected laser itself (by its own criteria). We only pass a
+# portPath when the user pins one with --port. Keeping USB-id knowledge in the
+# driver also avoids matching the eV's generic STM32 identity from here.
 
 
-def find_millennia_ports():
-    """Return the list of serial device paths that look like a Millennia eV."""
-    # Imported lazily so the GUI still launches if pyserial's tooling misbehaves.
-    from hardwarelibrary.communication.serialport import SerialPort
-
-    try:
-        return SerialPort.matchPorts(
-            idVendor=MILLENNIA_VID, idProduct=MILLENNIA_PID
-        )
-    except Exception:
-        return []
+# Serial-error classification (busy / permission / missing) now lives in
+# PyHardwareLibrary as devicecontroller.connectionErrorReason, which walks the
+# exception chain the driver preserves. _connection_message() uses it.
 
 
-def serial_reason(text):
-    """Classify a serial error string as 'busy' / 'permission' / 'missing' / None."""
-    text = (text or "").lower()
-    if "resource busy" in text or "errno 16" in text or "busy" in text:
-        return "busy"
-    if "permission" in text or "errno 13" in text or "access is denied" in text:
-        return "permission"
-    if ("no such file" in text or "errno 2" in text or "could not open" in text
-            or "filenotfounderror" in text):
-        return "missing"
-    return None
 
+# TODO(mytk-1.6.1): this decorator and the tag-scan in _register_remote_api are
+# slated to move into mytk's RemoteControllable. Once this project requires
+# mytk >= 1.6.1, DELETE this local copy, import remote_command from mytk, and
+# replace the scan loop with self.register_remote_commands() (see below).
+def remote_command(fct=None, *, name=None):
+    """Mark a method for remote exposure by ``_register_remote_api``.
 
-def exception_chain_text(err):
-    """Join an exception with its __cause__/__context__ chain into one string.
-
-    PyHardwareLibrary's MillenniaDevice now preserves the underlying serial
-    error through the chain (DCC-Lab/PyHardwareLibrary#98), so we can read the
-    'Resource busy' reason straight off the raised UnableToInitialize.
+    This is only a *tag*: it records the RPC name on the function and returns it
+    unchanged. The actual registration happens at runtime, once an instance (and
+    its ``self.remote`` registry) exists — ``@app.remote`` cannot be used in the
+    class body because there is no live app there yet. Use bare
+    (``@remote_command``) or with an explicit name (``@remote_command(name="status")``).
     """
-    parts, seen, cur = [], set(), err
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        text = str(cur).strip()
-        if text:
-            parts.append(text)
-        cur = cur.__cause__ or cur.__context__
-    return " | ".join(parts)
+    if fct is None:
+        return lambda f: remote_command(f, name=name)
+    fct._remote_name = name or fct.__name__
+    return fct
 
 
-def probe_port(port_path):
-    """Open then immediately close ``port_path`` to test availability.
+class MillenniaApp(App, RemoteControllable):
+    """A myTk App that builds the window and wires the widgets to the controller.
 
-    Returns (ok, reason) where reason is 'busy'/'permission'/'missing'/raw.
-    Used to gate auto-reconnect attempts (so we only try when the port is
-    actually free) and as a fallback classifier for older library versions
-    that did not preserve the init error.
-    """
-    try:
-        serial.Serial(port_path, 115200, timeout=0.3).close()
-        return True, None
-    except Exception as err:
-        return False, (serial_reason(str(err)) or str(err))
-
-
-class MillenniaController:
-    """Owns the device and the serial worker thread.
-
-    The GUI never touches the device directly: it enqueues commands and reads
-    state that the worker pushes back (marshalled onto the Tk main thread).
-    Keeping every device call on one thread serializes a long ON confirmation
-    against the periodic poll without any locking on the device itself.
+    Mixes in `RemoteControllable`, so the laser commands (turn_on, turn_off,
+    open_shutter, close_shutter) and a status query are reachable over RPC from
+    another process via ``mytk.connect(...)`` (localhost only, see
+    :meth:`_register_remote_api`).
     """
 
-    POLL_INTERVAL = 1.0      # seconds between status polls while connected
-    RECONNECT_INTERVAL = 2.0  # seconds between port checks while reconnecting
-
-    def __init__(self, on_state):
-        # on_state(**fields) is called from the worker thread; the App wraps it
-        # so the actual widget updates happen on the main thread.
-        self._on_state = on_state
-        self._queue = queue.Queue()
-        self._stop = threading.Event()
-        self.device = None
-        self._connected = False
-        # Auto-reconnect intent: True while the user wants to be connected, so
-        # an unexpected drop (or a laser absent at launch) is retried until the
-        # port reappears. An explicit Disconnect clears it.
-        self._want_connected = False
-        self._last_options = None
-        self._last_reconnect_attempt = 0.0
-        self._thread = threading.Thread(
-            target=self._run, name="millennia-worker", daemon=True
-        )
-
-    # -- public API (called from the GUI / main thread) --
-
-    def start(self):
-        self._thread.start()
-
-    def connect(self, simulate, port):
-        self._queue.put(("connect", {"simulate": simulate, "port": port}))
-
-    def disconnect(self):
-        self._queue.put(("disconnect", None))
-
-    def set_diodes(self, turn_on):
-        self._queue.put(("diodes", bool(turn_on)))
-
-    def set_shutter(self, open_it):
-        self._queue.put(("shutter", bool(open_it)))
-
-    def shutdown(self):
-        """Stop the worker and release the device (called on window close)."""
-        self._stop.set()
-        self._queue.put(("disconnect", None))
-        self._thread.join(timeout=5.0)
-
-    # -- worker thread --
-
-    def _push(self, **fields):
-        self._on_state(**fields)
-
-    def _run(self):
-        while not self._stop.is_set():
-            try:
-                command = self._queue.get(timeout=self.POLL_INTERVAL)
-            except queue.Empty:
-                command = None
-
-            if command is not None:
-                self._handle_command(command)
-
-            if self._connected and self.device is not None:
-                self._poll_once()
-            elif self._want_connected and not self._stop.is_set():
-                now = time.monotonic()
-                if now - self._last_reconnect_attempt >= self.RECONNECT_INTERVAL:
-                    self._last_reconnect_attempt = now
-                    self._try_reconnect()
-
-        self._safe_shutdown()
-
-    def _handle_command(self, command):
-        kind, payload = command
-        if kind == "connect":
-            self._do_connect(payload)
-        elif kind == "disconnect":
-            self._do_disconnect()
-        elif kind == "diodes":
-            self._do_set_diodes(payload)
-        elif kind == "shutter":
-            self._do_set_shutter(payload)
-
-    def _do_connect(self, options):
-        if self._connected:
-            return
-        # Record the intent and target so the worker can keep retrying this same
-        # connection if it drops or is not yet available.
-        self._want_connected = True
-        self._last_options = options
-        self._push(busy=True, status="Connecting…", status_kind="info")
-        try:
-            device = self._make_device(options)
-            device.initializeDevice()
-        except Exception as err:
-            self.device = None
-            self._connected = False
-            self._last_reconnect_attempt = time.monotonic()
-            # Still wanted: the worker will watch the port and retry.
-            self._push(
-                busy=False,
-                connected=False,
-                monitoring=True,
-                identity="",
-                diodes_on=None,
-                shutter_open=None,
-                power=None,
-                status=self._connection_message(err, options),
-                status_kind="warn",
-            )
-            return
-
-        self.device = device
-        self._connected = True
-        self._push(
-            busy=False,
-            connected=True,
-            monitoring=False,
-            identity=self._identity(device),
-            status="Connected",
-            status_kind="ok",
-        )
-        self._poll_once()
-
-    def _make_device(self, options):
-        # No pre-flight probe: just open the device. If it fails, the driver
-        # now preserves the underlying serial error, which _connection_message
-        # reads to explain why (busy / missing / permission).
-        if options["simulate"]:
-            return DebugMillenniaDevice()
-
-        port = options.get("port")
-        if not port:
-            ports = find_millennia_ports()
-            if not ports:
-                raise ConnectionError(
-                    "No Millennia serial port was found. The laser may be in "
-                    "use by another application (e.g. the Windows "
-                    "'Spectra-Physics' app under Parallels, which captures the "
-                    "USB port), or the USB driver did not attach. Close that "
-                    "app and check the cable — it will connect automatically."
-                )
-            port = ports[0]
-
-        return MillenniaDevice(portPath=port)
-
-    def _do_disconnect(self):
-        # Explicit user disconnect: clear the intent so we do NOT auto-reconnect.
-        self._want_connected = False
-        self._connected = False
-        self._safe_shutdown()
-        self._push(
-            connected=False,
-            monitoring=False,
-            busy=False,
-            identity="",
-            diodes_on=None,
-            shutter_open=None,
-            power=None,
-            status="Disconnected",
-            status_kind="info",
-        )
-
-    def _try_reconnect(self):
-        """Attempt a reconnect, but only when the port actually looks available.
-
-        Probing first avoids spamming 'Connecting…/failed' every couple of
-        seconds while the laser is simply gone.
-        """
-        options = self._last_options
-        if options is None or self._connected:
-            return
-        if not options.get("simulate"):
-            port = options.get("port")
-            if port:
-                ok, _ = probe_port(port)
-                if not ok:
-                    return  # still missing or busy
-            elif not find_millennia_ports():
-                return      # not back yet
-        self._do_connect(options)
-
-    def _safe_shutdown(self):
-        if self.device is not None:
-            try:
-                self.device.shutdownDevice()
-            except Exception:
-                pass
-            self.device = None
-
-    def _do_set_diodes(self, turn_on):
-        if not self._connected or self.device is None:
-            return
-        action = "on" if turn_on else "off"
-        self._push(busy=True, status="Turning diodes {0}…".format(action),
-                   status_kind="info")
-        try:
-            if turn_on:
-                self.device.turnOn()
-            else:
-                self.device.turnOff()
-        except Exception as err:
-            self._push(busy=False,
-                       status="Could not turn diodes {0}: {1}".format(action, err),
-                       status_kind="error")
-            return
-        self._push(busy=False, status="Connected", status_kind="ok")
-        self._poll_once()
-
-    def _do_set_shutter(self, open_it):
-        if not self._connected or self.device is None:
-            return
-        action = "Opening" if open_it else "Closing"
-        self._push(busy=True, status="{0} shutter…".format(action),
-                   status_kind="info")
-        try:
-            if open_it:
-                self.device.openShutter()
-            else:
-                self.device.closeShutter()
-        except Exception as err:
-            self._push(busy=False,
-                       status="Could not move shutter: {0}".format(err),
-                       status_kind="error")
-            return
-        self._push(busy=False, status="Connected", status_kind="ok")
-        self._poll_once()
-
-    def _poll_once(self):
-        try:
-            # One snapshot via the driver's status hook (PyHardwareLibrary#98);
-            # fall back to the individual queries on libraries without it.
-            status = self.device.doGetStatusUserInfo()
-            if status:
-                diodes_on = status["isLaserOn"]
-                shutter_open = status["isShutterOpen"]
-                power = status["power"]
-            else:
-                diodes_on = self.device.isLaserOn()
-                shutter_open = self.device.isShutterOpen()
-                power = self.device.power()
-        except Exception as err:
-            self._connected = False
-            self._safe_shutdown()
-            self._last_reconnect_attempt = time.monotonic()
-            # Intent (_want_connected) is left set, so the worker now watches
-            # the port and reconnects automatically when it reappears.
-            self._push(
-                connected=False,
-                monitoring=True,
-                diodes_on=None,
-                shutter_open=None,
-                power=None,
-                status="Connection lost ({0}). Monitoring port — will "
-                       "reconnect automatically.".format(err),
-                status_kind="warn",
-            )
-            return
-        self._push(diodes_on=diodes_on, shutter_open=shutter_open, power=power)
-
-    @staticmethod
-    def _identity(device):
-        parts = [
-            getattr(device, "manufacturer", None),
-            getattr(device, "model", None),
-        ]
-        label = " ".join(p for p in parts if p) or "Millennia"
-        serial_number = getattr(device, "laserSerialNumber", None)
-        firmware = getattr(device, "firmwareVersion", None)
-        if serial_number:
-            label += "   S/N {0}".format(serial_number)
-        if firmware:
-            label += "   fw {0}".format(firmware)
-        return label
-
-    @staticmethod
-    def _connection_message(err, options):
-        # ConnectionError messages we build are already user-facing.
-        if isinstance(err, ConnectionError):
-            return str(err)
-        # Read the cause off the preserved exception chain; fall back to a
-        # one-shot probe for older libraries that dropped the init error.
-        reason = serial_reason(exception_chain_text(err))
-        port = options.get("port")
-        if reason is None and port:
-            _, probed = probe_port(port)
-            reason = probed if probed in ("busy", "permission", "missing") else None
-        if reason == "busy":
-            return ("The laser's serial port is busy — another program is "
-                    "using it (e.g. the Spectra-Physics Windows app under "
-                    "Parallels). Close it and it will reconnect automatically.")
-        if reason == "permission":
-            return "Permission denied opening the laser's serial port."
-        if reason == "missing":
-            return ("The laser's serial port is not available. Waiting for it "
-                    "to reappear…")
-        return "Could not connect: {0}".format(exception_chain_text(err) or err)
-
-
-class MillenniaApp:
-    """Builds the window and wires the widgets to the controller."""
+    HELP_URL = "https://github.com/DCC-Lab/MilleniaUI"
 
     MAX_POWER = 30.0  # full-scale of the power Level bar (W)
 
@@ -435,43 +116,76 @@ class MillenniaApp:
         "error": "#cf222e",
     }
 
-    def __init__(self, simulate=False, port=None):
+    def __init__(self, simulate=False, port=None, remote=True, remote_port=8777):
         self.simulate_arg = simulate
         self.port_arg = port
+        self.remote_enabled = remote
+        self.remote_port = remote_port
 
         # Last known truth, so a button click can send the *opposite* action.
+        # These drive *derived* UI (button labels/enablement, status colour) and
+        # are observed rather than value-bound (see _bind_state_to_ui).
         self.connected = False
         self.monitoring = False  # disconnected but auto-reconnecting
         self.busy = False
-        self.diodes_on = None
-        self.shutter_open = None
+        # Whether each laser state is currently known (False before the first
+        # poll and after a drop); drives the "—" text and disables the buttons.
+        self.diode_known = False
+        self.shutter_known = False
 
-        self.app = App(geometry="640x460", name="Millennia eV Control")
-        self.app.window.widget.title(
+        # Displayed state value-bound 1:1 to widgets via the Bindable mixin:
+        # assigning any of these pushes the value straight to its widget(s).
+        # diode_on / shutter_open feed the on/off indicators, so they are plain
+        # bools (never None — a BooleanVar cannot hold None).
+        self.diode_on = False
+        self.shutter_open = False
+        self.power = 0.0
+        self.identity = ""
+        self.status = "Starting…"
+        self.status_kind = "info"
+
+        super().__init__(
+            geometry="640x460",
+            name="Millennia eV Control",
+            help_url=self.HELP_URL,
+        )
+        # App titles the window from `name`; use a richer title with the version.
+        self.root.title(
             "Millennia eV — Laser Control  (v{0})".format(__version__))
 
-        self.controller = MillenniaController(on_state=self._on_state_from_worker)
+        # PyHardwareLibrary's DeviceController owns the worker thread and reports
+        # through the NotificationCenter; it is created in _start_controller once
+        # the UI exists to observe it.
+        self.device = None
+        self.controller = None
 
         self._build_ui()
+        self._bind_state_to_ui()
 
-        self.app.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.controller.start()
+        # Clicking the window's close box routes through quit() so the worker
+        # thread and device are released cleanly.
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
-        # Auto-connect on launch using the CLI arguments.
-        self._update_controls_enabled()
-        self.controller.connect(self.simulate_arg, self.port_arg)
+        self._refresh_ui()
+
+        # Build the device + DeviceController and auto-connect. Done before the
+        # RPC server starts so a remote call can never see a None controller.
+        self._start_controller()
+
+        # Expose the laser commands over RPC (localhost) if enabled.
+        self._register_remote_api()
 
     # -- UI construction --
 
     def _build_ui(self):
-        window = self.app.window
+        window = self.window
 
         # --- Diodes (On/Off) -------------------------------------------
         diode_box = Box(label="Pump Diodes")
         diode_box.grid_into(window, column=0, row=0, padx=8, pady=6, sticky="nsew")
 
-        self.diode_lamp = BooleanIndicator(diameter=18)
-        self.diode_lamp.grid_into(diode_box, column=0, row=0, padx=8, pady=8)
+        self.diode_indicator = BooleanIndicator(diameter=18)
+        self.diode_indicator.grid_into(diode_box, column=0, row=0, padx=8, pady=8)
         self.diode_state_label = Label(text="—")
         self.diode_state_label.grid_into(diode_box, column=1, row=0,
                                          padx=4, pady=8, sticky="w")
@@ -485,8 +199,8 @@ class MillenniaApp:
         shutter_box = Box(label="Shutter")
         shutter_box.grid_into(window, column=1, row=0, padx=8, pady=6, sticky="nsew")
 
-        self.shutter_lamp = BooleanIndicator(diameter=18)
-        self.shutter_lamp.grid_into(shutter_box, column=0, row=0, padx=8, pady=8)
+        self.shutter_indicator = BooleanIndicator(diameter=18)
+        self.shutter_indicator.grid_into(shutter_box, column=0, row=0, padx=8, pady=8)
         self.shutter_state_label = Label(text="—")
         self.shutter_state_label.grid_into(shutter_box, column=1, row=0,
                                            padx=4, pady=8, sticky="w")
@@ -501,10 +215,9 @@ class MillenniaApp:
         power_box.grid_into(window, column=0, row=1, columnspan=2,
                             padx=8, pady=6, sticky="nsew")
 
-        self.power_var = DoubleVar(value=0.0)
-        self.power_indicator = NumericIndicator(
-            value_variable=self.power_var, format_string="{0:.2f} W"
-        )
+        # No explicit value_variable: NumericIndicator makes its own, and
+        # _bind_state_to_ui binds our `power` property to it.
+        self.power_indicator = NumericIndicator(format_string="{0:.2f} W")
         self.power_indicator.grid_into(power_box, column=0, row=0,
                                        padx=8, pady=(8, 2), sticky="w")
 
@@ -535,66 +248,210 @@ class MillenniaApp:
         self.connect_button.grid_into(conn_box, column=0, row=2,
                                       padx=8, pady=6, sticky="w")
 
-        self.rescan_button = Button(
-            "Rescan ports", user_event_callback=self._on_rescan_clicked
-        )
-        self.rescan_button.grid_into(conn_box, column=1, row=2,
-                                     padx=4, pady=6, sticky="w")
-
         window.all_resize_weight(1)
 
-    # -- worker -> main thread bridge --
+    # -- state <-> UI binding (Bindable mixin) --
 
-    def _on_state_from_worker(self, **fields):
-        # Called on the worker thread; bounce onto the Tk main thread.
-        self.app.schedule_on_main_thread(self._apply_state, kwargs=fields)
+    # State that drives *derived* UI (ON/OFF text, button labels/enablement,
+    # status colour) which cannot be value-bound 1:1, so we observe it and
+    # recompute in observed_property_changed. diode_on/shutter_open appear here
+    # too: besides driving their (value-bound) indicators, they change the button
+    # labels and the ON/OFF text.
+    DERIVED_TRIGGERS = frozenset(
+        {"connected", "monitoring", "busy", "diode_on", "diode_known",
+         "shutter_open", "shutter_known", "status_kind"}
+    )
 
-    def _apply_state(self, **fields):
-        if "status" in fields:
-            self.status_label.value_variable.set(fields["status"])
-            kind = fields.get("status_kind", "info")
-            color = self.STATUS_COLORS.get(kind, "#000000")
-            try:
-                self.status_label.widget.configure(foreground=color)
-            except Exception:
-                pass
+    def _bind_state_to_ui(self):
+        """Connect model state to widgets with the Bindable mixin.
 
-        if "identity" in fields:
-            self.identity_label.value_variable.set(fields["identity"] or "")
+        Two-way value bindings keep a property and a widget's ``value_variable``
+        synchronised automatically, so assigning the property updates the widget
+        (and vice-versa). State that first needs a transformation before it can
+        be shown is handled by observing it and recomputing the derived UI in
+        :meth:`observed_property_changed`.
 
-        if "connected" in fields:
-            self.connected = bool(fields["connected"])
+        Must run after :meth:`_build_ui`: a widget's ``value_variable`` only
+        exists once the widget has been placed on screen.
+        """
+        # Direct value bindings — one property, possibly several widgets.
+        self.bind_property_to_widget_value("diode_on", self.diode_indicator)
+        self.bind_property_to_widget_value("shutter_open", self.shutter_indicator)
+        self.bind_property_to_widget_value("power", self.power_indicator)
+        self.bind_property_to_widget_value("power", self.power_level)
+        self.bind_property_to_widget_value("identity", self.identity_label)
+        self.bind_property_to_widget_value("status", self.status_label)
 
-        if "monitoring" in fields:
-            self.monitoring = bool(fields["monitoring"])
+        # Derived UI — observe the raw state; recompute in the callback.
+        for name in self.DERIVED_TRIGGERS:
+            self.add_observer(self, name)
 
-        if "busy" in fields:
-            self.busy = bool(fields["busy"])
+    def observed_property_changed(self, observed, name, value, context):
+        # Let Bindable service the two-way value bindings first...
+        super().observed_property_changed(observed, name, value, context)
+        # ...then recompute anything that is a *function* of the raw state.
+        if name in self.DERIVED_TRIGGERS:
+            self._refresh_ui()
 
-        if "diodes_on" in fields:
-            self.diodes_on = fields["diodes_on"]
-            self._apply_lamp(self.diode_lamp, self.diode_state_label,
-                             self.diodes_on, "ON", "OFF")
+    def _refresh_ui(self):
+        """Recompute the derived UI from the current state.
 
-        if "shutter_open" in fields:
-            self.shutter_open = fields["shutter_open"]
-            self._apply_lamp(self.shutter_lamp, self.shutter_state_label,
-                             self.shutter_open, "OPEN", "CLOSED")
+        The on/off indicators are value-bound to diode_on / shutter_open, so
+        they need no work here — only the tri-state *text* ("—"/ON/OFF), the
+        status colour, and the buttons are functions of state.
+        """
+        self.diode_state_label.value_variable.set(
+            self._state_text(self.diode_known, self.diode_on, "ON", "OFF"))
+        self.shutter_state_label.value_variable.set(
+            self._state_text(self.shutter_known, self.shutter_open, "OPEN", "CLOSED"))
 
-        if "power" in fields:
-            power = fields["power"]
-            value = power if power is not None else 0.0
-            self.power_var.set(value)          # numeric readout
-            self.power_level.value_variable.set(value)  # bar indicator
+        color = self.STATUS_COLORS.get(self.status_kind, "#000000")
+        with suppress(Exception):
+            self.status_label.widget.configure(foreground=color)
 
         self._update_controls_enabled()
 
+    # -- DeviceController lifecycle --
+
+    def _make_device(self, simulate, port):
+        """Build the PhysicalDevice the controller will drive.
+
+        A port path is optional: with --port it is pinned, otherwise the device
+        discovers the connected laser itself (MillenniaDevice knows how to find
+        its instance). DebugMillenniaDevice is used in --simulate.
+        """
+        if simulate:
+            return DebugMillenniaDevice()
+        if port:
+            return MillenniaDevice(portPath=port)
+        return MillenniaDevice()
+
+    def _start_controller(self):
+        """Create the DeviceController for the current device and connect.
+
+        The controller owns the single worker thread; we observe its
+        notifications and marshal each onto the Tk main thread.
+        """
+        self.device = self._make_device(self.simulate_arg, self.port_arg)
+        self.controller = DeviceController(self.device)
+        self._observe_controller()
+        self.controller.start()
+        self.controller.connect()
+
+    def _stop_controller(self):
+        """Stop the worker and drop our observers (safe if never started)."""
+        NotificationCenter().removeObserver(self)
+        if self.controller is not None:
+            self.controller.stop()
+            self.controller = None
+
+    def _observe_controller(self):
+        nc = NotificationCenter()
+        for name in (N.didConnect, N.didDisconnect, N.connectionLost,
+                     N.connectionFailed, N.status, N.commandFailed):
+            nc.addObserver(self, self._controller_did_post, name, self.controller)
+
+    # -- controller notifications -> main thread -> bound state --
+
+    def _controller_did_post(self, notification):
+        # Runs on the controller's worker thread; bounce onto the Tk main thread
+        # before touching state (bindings/observers then update the widgets).
+        self.schedule_on_main_thread(
+            self._apply_notification,
+            args=(notification.name, notification.userInfo))
+
+    def _apply_notification(self, name, user_info):
+        """Translate one controller notification into bound state assignments.
+
+        The Bindable bindings/observers do the rest; we only ensure the two
+        never-None display values (power, identity) stay valid.
+        """
+        if name is N.didConnect:
+            self.identity = self._identity(user_info)
+            self.connected = True
+            self.monitoring = False
+            self.busy = False
+            self.status = "Connected"
+            self.status_kind = "ok"
+        elif name is N.status:
+            laser_on = user_info.get("isLaserOn")
+            shutter_open = user_info.get("isShutterOpen")
+            self.diode_on = bool(laser_on)
+            self.diode_known = laser_on is not None
+            self.shutter_open = bool(shutter_open)
+            self.shutter_known = shutter_open is not None
+            power = user_info.get("power")
+            self.power = power if power is not None else 0.0
+            self.busy = False
+        elif name is N.connectionLost:
+            self._enter_monitoring(
+                "Connection lost ({0}). Monitoring port — will reconnect "
+                "automatically.".format(user_info))
+        elif name is N.connectionFailed:
+            self._enter_monitoring(self._connection_message(user_info))
+        elif name is N.didDisconnect:
+            self.connected = False
+            self.monitoring = False
+            self.busy = False
+            self.identity = ""
+            self._clear_laser_state()
+            self.status = "Disconnected"
+            self.status_kind = "info"
+        elif name is N.commandFailed:
+            self.busy = False
+            self.status = "Command failed: {0}".format(user_info)
+            self.status_kind = "error"
+
+    def _clear_laser_state(self):
+        """Mark the laser state unknown (indicators off, "—" text, power 0)."""
+        self.diode_on = False
+        self.diode_known = False
+        self.shutter_open = False
+        self.shutter_known = False
+        self.power = 0.0
+
+    def _enter_monitoring(self, message):
+        """Common state for a lost/failed connection that will be retried."""
+        self.connected = False
+        self.monitoring = self.controller.autoReconnect
+        self.busy = False
+        self._clear_laser_state()
+        self.status = message
+        self.status_kind = "warn"
+
     @staticmethod
-    def _apply_lamp(lamp, label, value, true_text, false_text):
-        lamp.value_variable.set(bool(value) if value is not None else False)
-        label.value_variable.set(
-            "—" if value is None else (true_text if value else false_text)
-        )
+    def _identity(device):
+        parts = [getattr(device, "manufacturer", None),
+                 getattr(device, "model", None)]
+        label = " ".join(p for p in parts if p) or "Millennia"
+        serial_number = getattr(device, "laserSerialNumber", None)
+        firmware = getattr(device, "firmwareVersion", None)
+        if serial_number:
+            label += "   S/N {0}".format(serial_number)
+        if firmware:
+            label += "   fw {0}".format(firmware)
+        return label
+
+    @staticmethod
+    def _connection_message(error):
+        """Turn a connect failure into a user-facing line via the driver's
+        preserved error chain (connectionErrorReason from PyHardwareLibrary)."""
+        reason = connectionErrorReason(error)
+        if reason == "busy":
+            return ("The laser's serial port is busy — another program is using "
+                    "it (e.g. the Spectra-Physics Windows app under Parallels). "
+                    "Close it and it will reconnect automatically.")
+        if reason == "permission":
+            return "Permission denied opening the laser's serial port."
+        if reason == "missing":
+            return ("The laser is not available (no connected Millennia found). "
+                    "Waiting for it to reappear…")
+        return "Could not connect: {0}".format(error or type(error).__name__)
+
+    @staticmethod
+    def _state_text(known, value, true_text, false_text):
+        """The tri-state label text: "—" when unknown, else true/false text."""
+        return "—" if not known else (true_text if value else false_text)
 
     # -- control enable/disable + button labels --
 
@@ -607,14 +464,11 @@ class MillenniaApp:
         self.connect_button.label = (
             "Disconnect" if (connected or self.monitoring) else "Connect"
         )
-        # Rescan only makes sense when idle and not actively connected.
-        self.rescan_button.is_disabled = connected or self.busy
-
-        self.diode_button.is_disabled = not idle or self.diodes_on is None
-        self.shutter_button.is_disabled = not idle or self.shutter_open is None
+        self.diode_button.is_disabled = not idle or not self.diode_known
+        self.shutter_button.is_disabled = not idle or not self.shutter_known
 
         self.diode_button.label = (
-            "Turn Off" if self.diodes_on else "Turn On"
+            "Turn Off" if self.diode_on else "Turn On"
         )
         self.shutter_button.label = (
             "Close Shutter" if self.shutter_open else "Open Shutter"
@@ -628,46 +482,116 @@ class MillenniaApp:
         if self.connected or self.monitoring:
             self.controller.disconnect()
         else:
-            self.controller.connect(self.simulate_arg, self.port_arg)
-
-    def _on_rescan_clicked(self, event, button):
-        ports = find_millennia_ports()
-        if ports:
-            self.port_arg = ports[0]
-            self.status_label.value_variable.set(
-                "Found Millennia at {0}. Press Connect.".format(ports[0])
-            )
-            self.status_label.widget.configure(
-                foreground=self.STATUS_COLORS["ok"]
-            )
-        else:
-            self.port_arg = None
-            self.status_label.value_variable.set(
-                "No Millennia serial port found (it may be captured by another "
-                "app, e.g. Spectra-Physics under Parallels)."
-            )
-            self.status_label.widget.configure(
-                foreground=self.STATUS_COLORS["warn"]
-            )
+            self.controller.connect()
 
     def _on_diode_clicked(self, event, button):
-        if self.diodes_on is None:
+        if not self.diode_known:
             return
-        self.controller.set_diodes(not self.diodes_on)
+        self.turn_off() if self.diode_on else self.turn_on()
 
     def _on_shutter_clicked(self, event, button):
-        if self.shutter_open is None:
+        if not self.shutter_known:
             return
-        self.controller.set_shutter(not self.shutter_open)
+        self.close_shutter() if self.shutter_open else self.open_shutter()
 
-    def _on_close(self):
+    # -- laser commands (invoked by the buttons; the surface exposed over RPC
+    #    via RemoteControllable). Each submits a device action onto the
+    #    controller's worker thread; DeviceController rejects it (commandFailed)
+    #    when not connected, so they are safe to call any time and take no
+    #    arguments (RPC-friendly). --
+
+    def _submit(self, action):
+        # Mark busy immediately (the observer disables the controls); the next
+        # status/commandFailed notification clears it.
+        self.busy = True
+        self.controller.submit(action)
+
+    @remote_command
+    def turn_on(self):
+        """Turn the pump diodes on."""
+        self._submit(lambda device: device.turnOn())
+
+    @remote_command
+    def turn_off(self):
+        """Turn the pump diodes off."""
+        self._submit(lambda device: device.turnOff())
+
+    @remote_command
+    def open_shutter(self):
+        """Open the shutter."""
+        self._submit(lambda device: device.openShutter())
+
+    @remote_command
+    def close_shutter(self):
+        """Close the shutter."""
+        self._submit(lambda device: device.closeShutter())
+
+    # -- remote control (RemoteControllable) --
+
+    def _register_remote_api(self):
+        """Expose every ``@remote_command`` method over RPC and start the server.
+
+        RemoteControllable marshals each remote call onto the Tk main thread, so
+        the exposed functions are exactly the ones the buttons call. Clients
+        connect with ``mytk.connect(port=..., app_name="Millennia eV Control")``
+        and may call turn_on/turn_off/open_shutter/close_shutter or ``status()``.
+        """
+        if not self.remote_enabled:
+            return
+        # Read the @remote_command tag off the class (not the instance) so we
+        # never trigger a property getter while scanning.
+        # TODO(mytk-1.6.1): replace this loop with self.register_remote_commands()
+        # once RemoteControllable provides it.
+        for attr_name in dir(type(self)):
+            tagged = getattr(type(self), attr_name, None)
+            remote_name = getattr(tagged, "_remote_name", None)
+            if remote_name is not None:
+                self.remote(getattr(self, attr_name), name=remote_name)
+        bound_port = self.start_remote(port=self.remote_port, app_name=self.name)
+        print("Remote control listening on 127.0.0.1:{0} (app '{1}').".format(
+            bound_port, self.name))
+
+    @remote_command(name="status")
+    def remote_status(self):
+        """Return a snapshot of the laser state for remote clients.
+
+        All values are XML-RPC serializable. ``diodes_on`` / ``shutter_open``
+        are None while unknown (not yet polled, or disconnected).
+        """
+        return {
+            "connected": self.connected,
+            "monitoring": self.monitoring,
+            "busy": self.busy,
+            "diodes_on": self.diode_on if self.diode_known else None,
+            "shutter_open": self.shutter_open if self.shutter_known else None,
+            "power": self.power,
+            "status": self.status,
+            "identity": self.identity,
+        }
+
+    # -- App lifecycle / menu overrides --
+
+    def quit(self):
+        """Release the worker thread and device, then tear the window down."""
         try:
-            self.controller.shutdown()
+            self._stop_controller()
         finally:
-            self.app.quit()
+            super().quit()
 
-    def run(self):
-        self.app.mainloop()
+    def save(self):
+        """No document model to save; the File ▸ Save… menu item is inert here."""
+        Dialog.showinfo(
+            title="Nothing to save",
+            message="This application controls the laser live; there is no "
+                    "document to save.",
+        )
+
+    def preferences(self):
+        """No preferences UI yet."""
+        Dialog.showinfo(
+            title="Preferences",
+            message="There are no preferences for this application.",
+        )
 
 
 def main():
@@ -681,14 +605,28 @@ def main():
     )
     parser.add_argument(
         "--port", default=None,
-        help="Serial port path (e.g. /dev/cu.usbmodemXXXX). Auto-detected if omitted.",
+        help="Serial port path to pin (e.g. /dev/cu.usbmodemXXXX); optional — "
+             "the connected laser is auto-discovered if omitted.",
+    )
+    parser.add_argument(
+        "--no-remote", action="store_true",
+        help="Do not start the localhost remote-control (RPC) server.",
+    )
+    parser.add_argument(
+        "--remote-port", type=int, default=8777,
+        help="Port for the remote-control server (default 8777).",
     )
     # parse_known_args so a stray argument from a Finder/.app launch (e.g. an
     # old-style -psn_ process serial number) never aborts startup.
     args, _ = parser.parse_known_args()
 
     try:
-        MillenniaApp(simulate=args.simulate, port=args.port).run()
+        MillenniaApp(
+            simulate=args.simulate,
+            port=args.port,
+            remote=not args.no_remote,
+            remote_port=args.remote_port,
+        ).mainloop()
     except Exception:
         # A bundled .app has no terminal, so a startup crash would vanish.
         # Record it where the user (or a developer) can find it.
