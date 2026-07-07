@@ -25,16 +25,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `slug` is the OS/arch suffix used in the archive + artifact names;
+          # it MUST be unique per macOS arch or the two .app archives collide.
           - os: macos-15-intel    # Intel macOS -> x86_64 .app (matches the bench).
                                    # macos-13 (the old Intel image) was retired
                                    # Dec 2025; macos-15-intel is the x86_64 label.
-            artifact: MilleniaUI-macOS-x86_64
+            slug: macOS-x86_64
           - os: macos-14          # Apple Silicon -> arm64 .app
-            artifact: MilleniaUI-macOS-arm64
+            slug: macOS-arm64
           - os: windows-latest
-            artifact: MilleniaUI-Windows
+            slug: Windows
           - os: ubuntu-22.04
-            artifact: MilleniaUI-Linux
+            slug: Linux
 
     steps:
       - uses: actions/checkout@v4
@@ -147,21 +149,21 @@ jobs:
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: cd packaging/dist && zip -r -y "../../MilleniaUI-${VERSION}-macOS.zip" MilleniaUI.app
+        run: cd packaging/dist && zip -r -y "../../MilleniaUI-${VERSION}-${{ matrix.slug }}.zip" MilleniaUI.app
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path packaging/dist/MilleniaUI -DestinationPath "MilleniaUI-$env:VERSION-Windows.zip"
+        run: Compress-Archive -Path packaging/dist/MilleniaUI -DestinationPath "MilleniaUI-$env:VERSION-${{ matrix.slug }}.zip"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tar -czf "MilleniaUI-${VERSION}-Linux.tar.gz" -C packaging/dist MilleniaUI
+        run: tar -czf "MilleniaUI-${VERSION}-${{ matrix.slug }}.tar.gz" -C packaging/dist MilleniaUI
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: MilleniaUI-${{ matrix.slug }}
           path: |
             MilleniaUI-*.zip
             MilleniaUI-*.tar.gz
