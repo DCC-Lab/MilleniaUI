@@ -25,7 +25,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13          # Intel macOS -> x86_64 .app (matches the bench)
+          - os: macos-15-intel    # Intel macOS -> x86_64 .app (matches the bench).
+                                   # macos-13 (the old Intel image) was retired
+                                   # Dec 2025; macos-15-intel is the x86_64 label.
             artifact: MilleniaUI-macOS
           - os: windows-latest
             artifact: MilleniaUI-Windows
