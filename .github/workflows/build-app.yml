@@ -28,7 +28,9 @@ jobs:
           - os: macos-15-intel    # Intel macOS -> x86_64 .app (matches the bench).
                                    # macos-13 (the old Intel image) was retired
                                    # Dec 2025; macos-15-intel is the x86_64 label.
-            artifact: MilleniaUI-macOS
+            artifact: MilleniaUI-macOS-x86_64
+          - os: macos-14          # Apple Silicon -> arm64 .app
+            artifact: MilleniaUI-macOS-arm64
           - os: windows-latest
             artifact: MilleniaUI-Windows
           - os: ubuntu-22.04
