@@ -425,6 +425,10 @@ class MillenniaController:
         return "Could not connect: {0}".format(exception_chain_text(err) or err)
 
 
+# TODO(mytk-1.6.1): this decorator and the tag-scan in _register_remote_api are
+# slated to move into mytk's RemoteControllable. Once this project requires
+# mytk >= 1.6.1, DELETE this local copy, import remote_command from mytk, and
+# replace the scan loop with self.register_remote_commands() (see below).
 def remote_command(fct=None, *, name=None):
     """Mark a method for remote exposure by ``_register_remote_api``.
 
@@ -767,6 +771,8 @@ class MillenniaApp(App, RemoteControllable):
             return
         # Read the @remote_command tag off the class (not the instance) so we
         # never trigger a property getter while scanning.
+        # TODO(mytk-1.6.1): replace this loop with self.register_remote_commands()
+        # once RemoteControllable provides it.
         for attr_name in dir(type(self)):
             tagged = getattr(type(self), attr_name, None)
             remote_name = getattr(tagged, "_remote_name", None)
