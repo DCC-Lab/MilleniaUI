@@ -23,10 +23,13 @@ Windows "Spectra-Physics" app), the status line says so explicitly instead of
 failing silently. Use the Simulator checkbox to drive a DebugMillenniaDevice
 when no hardware is reachable.
 
+The Millennia is addressed by an explicit serial port (--port): the library
+does not discover it by USB id, because the eV's STM32 virtual COM port uses a
+generic identity shared by unrelated boards.
+
 Run:
-    python millennia_ui.py                 # auto-detect the Millennia serial port
-    python millennia_ui.py --port /dev/cu.usbmodemXXXX
-    python millennia_ui.py --simulate      # no hardware needed
+    python millennia_ui.py --port /dev/cu.usbmodemXXXX   # the real laser
+    python millennia_ui.py --simulate                    # no hardware needed
 """
 
 import argparse
@@ -62,22 +65,11 @@ try:
 except Exception:
     __version__ = "0.0.0+dev"
 
-# The eV's back-panel USB port enumerates as a generic STM32 Virtual COM Port.
-MILLENNIA_VID = 0x0483
-MILLENNIA_PID = 0x5740
-
-
-def find_millennia_ports():
-    """Return the list of serial device paths that look like a Millennia eV."""
-    # Imported lazily so the GUI still launches if pyserial's tooling misbehaves.
-    from hardwarelibrary.communication.serialport import SerialPort
-
-    try:
-        return SerialPort.matchPorts(
-            idVendor=MILLENNIA_VID, idProduct=MILLENNIA_PID
-        )
-    except Exception:
-        return []
+# USB VID/PID and port matching are intentionally NOT handled here: the
+# Millennia's back-panel port enumerates as a *generic* STM32 Virtual COM Port
+# (0x0483:0x5740), an identity shared by unrelated boards, so PyHardwareLibrary
+# deliberately addresses the eV by an explicit portPath rather than discovering
+# it. The laser is therefore reached via --port (see _make_device).
 
 
 # Serial-error classification (busy / permission / missing) now lives in
@@ -251,12 +243,6 @@ class MillenniaApp(App, RemoteControllable):
         self.connect_button.grid_into(conn_box, column=0, row=2,
                                       padx=8, pady=6, sticky="w")
 
-        self.rescan_button = Button(
-            "Rescan ports", user_event_callback=self._on_rescan_clicked
-        )
-        self.rescan_button.grid_into(conn_box, column=1, row=2,
-                                     padx=4, pady=6, sticky="w")
-
         window.all_resize_weight(1)
 
     # -- state <-> UI binding (Bindable mixin) --
@@ -316,22 +302,19 @@ class MillenniaApp(App, RemoteControllable):
     def _make_device(self, simulate, port):
         """Build the PhysicalDevice the controller will drive.
 
-        Never raises: for the real laser with no port yet, it returns a device
-        with ``portPath=None`` whose initializeDevice() fails meaningfully, so
-        the DeviceController surfaces it as a connectionFailed we can explain.
+        The real laser is addressed by an explicit ``portPath`` (--port): the
+        library does not discover the Millennia by USB id (its STM32 identity is
+        generic). With no port, initializeDevice() fails and the
+        DeviceController surfaces it as a connectionFailed we explain.
         """
         if simulate:
             return DebugMillenniaDevice()
-        if not port:
-            ports = find_millennia_ports()
-            port = ports[0] if ports else None
         return MillenniaDevice(portPath=port)
 
     def _start_controller(self):
         """Create the DeviceController for the current device and connect.
 
-        Rebuilds from scratch (used at launch and after a Rescan changes the
-        port). The controller owns the single worker thread; we observe its
+        The controller owns the single worker thread; we observe its
         notifications and marshal each onto the Tk main thread.
         """
         self.device = self._make_device(self.simulate_arg, self.port_arg)
@@ -426,8 +409,7 @@ class MillenniaApp(App, RemoteControllable):
             label += "   fw {0}".format(firmware)
         return label
 
-    @staticmethod
-    def _connection_message(error):
+    def _connection_message(self, error):
         """Turn a connect failure into a user-facing line via the driver's
         preserved error chain (connectionErrorReason from PyHardwareLibrary)."""
         reason = connectionErrorReason(error)
@@ -440,6 +422,9 @@ class MillenniaApp(App, RemoteControllable):
         if reason == "missing":
             return ("The laser's serial port is not available. Waiting for it "
                     "to reappear…")
+        if not self.simulate_arg and not self.port_arg:
+            return ("No serial port specified — launch with --port "
+                    "/dev/cu.usbmodemXXXX to reach the laser.")
         return "Could not connect: {0}".format(error)
 
     @staticmethod
@@ -460,9 +445,6 @@ class MillenniaApp(App, RemoteControllable):
         self.connect_button.label = (
             "Disconnect" if (connected or self.monitoring) else "Connect"
         )
-        # Rescan only makes sense when idle and not actively connected.
-        self.rescan_button.is_disabled = connected or self.busy
-
         self.diode_button.is_disabled = not idle or self.diodes_on is None
         self.shutter_button.is_disabled = not idle or self.shutter_open is None
 
@@ -482,22 +464,6 @@ class MillenniaApp(App, RemoteControllable):
             self.controller.disconnect()
         else:
             self.controller.connect()
-
-    def _on_rescan_clicked(self, event, button):
-        # Re-detect the port; if one is found, rebuild the controller around the
-        # new device and reconnect. The binding/observer update the UI.
-        ports = find_millennia_ports()
-        if ports:
-            self.port_arg = ports[0]
-            self.status = "Found Millennia at {0}. Reconnecting…".format(ports[0])
-            self.status_kind = "ok"
-            self._stop_controller()
-            self._start_controller()
-        else:
-            self.port_arg = None
-            self.status = ("No Millennia serial port found (it may be captured "
-                           "by another app, e.g. Spectra-Physics under Parallels).")
-            self.status_kind = "warn"
 
     def _on_diode_clicked(self, event, button):
         if self.diodes_on is None:
@@ -620,7 +586,8 @@ def main():
     )
     parser.add_argument(
         "--port", default=None,
-        help="Serial port path (e.g. /dev/cu.usbmodemXXXX). Auto-detected if omitted.",
+        help="Serial port path of the laser (e.g. /dev/cu.usbmodemXXXX); "
+             "required for the real hardware.",
     )
     parser.add_argument(
         "--no-remote", action="store_true",
