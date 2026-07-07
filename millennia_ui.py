@@ -55,6 +55,7 @@ from mytk import (
     Level,
     NumericIndicator,
     RemoteControllable,
+    remote_command,
 )
 
 from hardwarelibrary.sources.millennia import (
@@ -85,25 +86,6 @@ except Exception:
 # PyHardwareLibrary as devicecontroller.connectionErrorReason, which walks the
 # exception chain the driver preserves. _connection_message() uses it.
 
-
-
-# TODO(mytk-1.6.1): this decorator and the tag-scan in _register_remote_api are
-# slated to move into mytk's RemoteControllable. Once this project requires
-# mytk >= 1.6.1, DELETE this local copy, import remote_command from mytk, and
-# replace the scan loop with self.register_remote_commands() (see below).
-def remote_command(fct=None, *, name=None):
-    """Mark a method for remote exposure by ``_register_remote_api``.
-
-    This is only a *tag*: it records the RPC name on the function and returns it
-    unchanged. The actual registration happens at runtime, once an instance (and
-    its ``self.remote`` registry) exists — ``@app.remote`` cannot be used in the
-    class body because there is no live app there yet. Use bare
-    (``@remote_command``) or with an explicit name (``@remote_command(name="status")``).
-    """
-    if fct is None:
-        return lambda f: remote_command(f, name=name)
-    fct._remote_name = name or fct.__name__
-    return fct
 
 
 class MillenniaApp(App, RemoteControllable):
@@ -548,15 +530,8 @@ class MillenniaApp(App, RemoteControllable):
         """
         if not self.remote_enabled:
             return
-        # Read the @remote_command tag off the class (not the instance) so we
-        # never trigger a property getter while scanning.
-        # TODO(mytk-1.6.1): replace this loop with self.register_remote_commands()
-        # once RemoteControllable provides it.
-        for attr_name in dir(type(self)):
-            tagged = getattr(type(self), attr_name, None)
-            remote_name = getattr(tagged, "_remote_name", None)
-            if remote_name is not None:
-                self.remote(getattr(self, attr_name), name=remote_name)
+        # start_remote() auto-registers every @remote_command method (mytk >=
+        # 1.8), so there is nothing to register by hand.
         bound_port = self.start_remote(port=self.remote_port, app_name=self.name)
         print("Remote control listening on 127.0.0.1:{0} (app '{1}').".format(
             bound_port, self.name))

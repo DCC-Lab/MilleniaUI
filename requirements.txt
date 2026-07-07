@@ -1,4 +1,4 @@
 # Millennia eV control GUI dependencies
-mytk>=1.6.0            # RemoteControllable / remote RPC server
+mytk>=1.8.0        # RemoteControllable + remote_command auto-registration
 pyserial
 hardwarelibrary>=1.3.2  # PyHardwareLibrary: DeviceController + portless auto-discovery
