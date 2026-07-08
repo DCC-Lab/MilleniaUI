@@ -43,6 +43,20 @@ import argparse
 import os
 import sys
 from contextlib import suppress
+
+# matplotlib is pulled in transitively (via PyHardwareLibrary), even though this
+# app never plots. Pin its cache to a stable per-user dir so the font cache is
+# built once and reused. A frozen PyInstaller app otherwise points MPLCONFIGDIR
+# at a fresh temp dir (deleted at exit), so matplotlib rebuilt the font cache on
+# *every* millenia-ctl call. Must run before matplotlib is first imported — i.e.
+# before the mytk / hardwarelibrary imports below.
+try:
+    _mpl_cache = os.path.join(os.path.expanduser("~"), ".milleniaui", "matplotlib")
+    os.makedirs(_mpl_cache, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = _mpl_cache
+except OSError:
+    pass
+
 from tkinter import TclError
 
 from mytk import (
