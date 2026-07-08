@@ -92,7 +92,7 @@ jobs:
             --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib \
             --collect-all numpy --collect-all PIL --collect-all serial --collect-all usb \
             --collect-all pyftdi --collect-all dateutil --collect-all fontTools \
-            --collect-all kiwisolver --collect-all cycler --collect-all pyparsing \
+            --collect-all kiwisolver --collect-all cycler --collect-all pyparsing --collect-all zeroconf --collect-all ifaddr \
             --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
             --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6 \
             --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \
@@ -120,7 +120,7 @@ jobs:
           --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib
           --collect-all numpy --collect-all PIL --collect-all serial --collect-all usb
           --collect-all pyftdi --collect-all dateutil --collect-all fontTools
-          --collect-all kiwisolver --collect-all cycler --collect-all pyparsing
+          --collect-all kiwisolver --collect-all cycler --collect-all pyparsing --collect-all zeroconf --collect-all ifaddr
           --exclude-module pandas --exclude-module scipy --exclude-module openpyxl
           --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6
           --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx
@@ -137,7 +137,7 @@ jobs:
             --collect-all mytk --collect-all hardwarelibrary --collect-all matplotlib \
             --collect-all numpy --collect-all PIL --collect-all serial --collect-all usb \
             --collect-all pyftdi --collect-all dateutil --collect-all fontTools \
-            --collect-all kiwisolver --collect-all cycler --collect-all pyparsing \
+            --collect-all kiwisolver --collect-all cycler --collect-all pyparsing --collect-all zeroconf --collect-all ifaddr \
             --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
             --exclude-module et_xmlfile --exclude-module PyQt5 --exclude-module PyQt6 \
             --exclude-module PySide2 --exclude-module PySide6 --exclude-module wx \

@@ -76,6 +76,10 @@ try:
 except Exception:
     __version__ = "0.0.0+dev"
 
+# The app's identity: the window/menu name, the mDNS service name the app
+# advertises (advertise_remote), and the name millenia-ctl discovers.
+APP_NAME = "Millennia eV Control"
+
 # Device discovery is PyHardwareLibrary's job, not the app's: MillenniaDevice()
 # finds the connected laser itself (by its own criteria). We only pass a
 # portPath when the user pins one with --port. Keeping USB-id knowledge in the
@@ -108,7 +112,7 @@ class MillenniaApp(App, RemoteControllable):
         "error": "#cf222e",
     }
 
-    def __init__(self, simulate=False, port=None, remote=True, remote_port=8777):
+    def __init__(self, simulate=False, port=None, remote=True, remote_port=0):
         self.simulate_arg = simulate
         self.port_arg = port
         self.remote_enabled = remote
@@ -138,7 +142,7 @@ class MillenniaApp(App, RemoteControllable):
 
         super().__init__(
             geometry="640x460",
-            name="Millennia eV Control",
+            name=APP_NAME,
             help_url=self.HELP_URL,
         )
         # App titles the window from `name`; use a richer title with the version.
@@ -521,20 +525,32 @@ class MillenniaApp(App, RemoteControllable):
     # -- remote control (RemoteControllable) --
 
     def _register_remote_api(self):
-        """Expose every ``@remote_command`` method over RPC and start the server.
+        """Expose every ``@remote_command`` method over RPC and advertise it.
 
         RemoteControllable marshals each remote call onto the Tk main thread, so
-        the exposed functions are exactly the ones the buttons call. Clients
-        connect with ``mytk.connect(port=..., app_name="Millennia eV Control")``
-        and may call turn_on/turn_off/open_shutter/close_shutter or ``status()``.
+        the exposed functions are exactly the ones the buttons call. Clients find
+        the app with ``mytk.discover(app_name=...)`` (or ``millenia-ctl``) and
+        may call turn_on/turn_off/open_shutter/close_shutter or ``status()``.
         """
         if not self.remote_enabled:
             return
-        # start_remote() auto-registers every @remote_command method (mytk >=
-        # 1.8), so there is nothing to register by hand.
-        bound_port = self.start_remote(port=self.remote_port, app_name=self.name)
-        print("Remote control listening on 127.0.0.1:{0} (app '{1}').".format(
-            bound_port, self.name))
+        # advertise_remote() = start_remote() (which auto-registers every
+        # @remote_command method, mytk >= 1.8) plus an mDNS/Zeroconf
+        # announcement, so clients discover us by name instead of a fixed port.
+        # remote_port=0 lets the OS pick a free port (it is advertised).
+        try:
+            bound_port = self.advertise_remote(port=self.remote_port)
+            print("Remote control advertised as '{0}' on port {1} — find it "
+                  "with mytk.discover / millenia-ctl.".format(
+                      self.name, bound_port))
+        except Exception as err:
+            # mDNS needs zeroconf + a usable network; if that fails, still serve
+            # so millenia-ctl --port works. Bind a known port (not 0) so the
+            # client has something to target without discovery.
+            bound_port = self.start_remote(
+                port=self.remote_port or 8777, app_name=self.name)
+            print("Remote control on port {0} (not advertised: {1}). "
+                  "Use: millenia-ctl --port {0}.".format(bound_port, err))
 
     @remote_command(name="status")
     def remote_status(self):
@@ -626,8 +642,8 @@ def cli_main(argv):
 
     This is the same executable as the GUI, invoked either through the
     ``millenia-ctl`` symlink (see :func:`install_cli`) or as ``… ctl <cmd>``.
-    It only talks to an already-running app, so it stays lightweight (the
-    transport is stdlib XML-RPC via ``mytk.connect``).
+    By default it finds the app on the local network with ``mytk.discover``
+    (mDNS); pass ``--port`` to connect directly to a known host/port instead.
     """
     parser = argparse.ArgumentParser(
         prog="millenia-ctl",
@@ -638,25 +654,39 @@ def cli_main(argv):
         "command", choices=["status", "on", "off", "open", "close"],
         help="status; on/off (pump diodes); open/close (shutter).",
     )
+    parser.add_argument("--port", type=int, default=None,
+                        help="Connect directly to this port instead of "
+                             "discovering the app over the network (mDNS).")
     parser.add_argument("--host", default="127.0.0.1",
-                        help="Server host (default 127.0.0.1).")
-    parser.add_argument("--port", type=int, default=8777,
-                        help="Server port (default 8777).")
+                        help="Host to use with --port (default 127.0.0.1).")
+    parser.add_argument("--timeout", type=float, default=3.0,
+                        help="Seconds to wait for discovery (default 3).")
     args = parser.parse_args(argv)
 
     import mytk
 
     try:
-        remote = mytk.connect(host=args.host, port=args.port,
-                              app_name="Millennia eV Control")
+        if args.port is not None:
+            remote = mytk.connect(host=args.host, port=args.port,
+                                  app_name=APP_NAME)
+        else:
+            remote = mytk.discover(app_name=APP_NAME, timeout=args.timeout)
     except mytk.RemoteAppMismatch as err:
         print("Reached a server, but it is not MilleniaUI: {0}".format(err),
               file=sys.stderr)
         return 2
+    except TimeoutError:
+        print("No MilleniaUI found on the network within {0:g}s. Is the app "
+              "running (and not launched with --no-remote)? You can also "
+              "connect directly with --port.".format(args.timeout),
+              file=sys.stderr)
+        return 2
+    except ImportError as err:
+        print("Network discovery needs the 'zeroconf' package: {0}".format(err),
+              file=sys.stderr)
+        return 2
     except Exception as err:  # connection refused, etc.
-        print("Cannot reach MilleniaUI at {0}:{1} — is the app running with its "
-              "remote server enabled (i.e. not launched with --no-remote)? [{2}]"
-              .format(args.host, args.port, err), file=sys.stderr)
+        print("Cannot reach MilleniaUI: {0}".format(err), file=sys.stderr)
         return 2
 
     try:
@@ -784,11 +814,12 @@ def gui_main():
     )
     parser.add_argument(
         "--no-remote", action="store_true",
-        help="Do not start the localhost remote-control (RPC) server.",
+        help="Do not start / advertise the remote-control (RPC) server.",
     )
     parser.add_argument(
-        "--remote-port", type=int, default=8777,
-        help="Port for the remote-control server (default 8777).",
+        "--remote-port", type=int, default=0,
+        help="Port for the remote-control server (default 0 = OS-picked; the "
+             "chosen port is advertised over mDNS so clients discover it).",
     )
     # parse_known_args so a stray argument from a Finder/.app launch (e.g. an
     # old-style -psn_ process serial number) never aborts startup.

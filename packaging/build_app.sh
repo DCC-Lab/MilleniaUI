@@ -47,6 +47,7 @@ pyinstaller --windowed --name MilleniaUI --noconfirm \
   --collect-all kiwisolver \
   --collect-all cycler \
   --collect-all pyparsing \
+  --collect-all zeroconf --collect-all ifaddr \
   --exclude-module pandas --exclude-module scipy --exclude-module openpyxl \
   --exclude-module et_xmlfile \
   --exclude-module PyQt5 --exclude-module PyQt6 \
