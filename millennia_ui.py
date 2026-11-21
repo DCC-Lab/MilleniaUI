@@ -81,7 +81,7 @@ from hardwarelibrary.devicecontroller import (
     DeviceControllerNotification as N,
     connectionErrorReason,
 )
-from hardwarelibrary.notificationcenter import NotificationCenter
+from notificationcenter import NotificationCenter
 
 # Version is injected at build time by packaging/make_version.py (from the git
 # tag); falls back to a dev marker when running from a checkout.
@@ -350,7 +350,7 @@ class MillenniaApp(App, RemoteControllable):
 
     def _stop_controller(self):
         """Stop the worker and drop our observers (safe if never started)."""
-        NotificationCenter().removeObserver(self)
+        NotificationCenter().remove_observer(self)
         if self.controller is not None:
             self.controller.stop()
             self.controller = None
@@ -359,7 +359,7 @@ class MillenniaApp(App, RemoteControllable):
         nc = NotificationCenter()
         for name in (N.didConnect, N.didDisconnect, N.connectionLost,
                      N.connectionFailed, N.status, N.commandFailed):
-            nc.addObserver(self, self._controller_did_post, name, self.controller)
+            nc.add_observer(self, self._controller_did_post, name, self.controller)
 
     # -- controller notifications -> main thread -> bound state --
 
@@ -368,7 +368,7 @@ class MillenniaApp(App, RemoteControllable):
         # before touching state (bindings/observers then update the widgets).
         self.schedule_on_main_thread(
             self._apply_notification,
-            args=(notification.name, notification.userInfo))
+            args=(notification.name, notification.user_info))
 
     def _apply_notification(self, name, user_info):
         """Translate one controller notification into bound state assignments.

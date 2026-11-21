@@ -1,5 +1,6 @@
 # Millennia eV control GUI dependencies
 mytk>=1.8.0        # RemoteControllable + remote_command auto-registration
 pyserial
-hardwarelibrary>=1.3.2  # PyHardwareLibrary: DeviceController + portless auto-discovery
+hardwarelibrary>=2.0.0  # PyHardwareLibrary: DeviceController + portless auto-discovery;
+                        # 2.0 moved NotificationCenter to the notifcenter package (snake_case API)
 zeroconf           # mDNS advertise_remote() / discover() for millenia-ctl
